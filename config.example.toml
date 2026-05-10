@@ -1,0 +1,30 @@
+[profile]
+sales_name = "Alice"
+timezone = "Asia/Shanghai"
+
+[eboss]
+base_url = "http://10.21.14.4:30010/api"
+api_key_file = "./secrets/eboss-api-key.txt"
+timeout_seconds = 240
+page_size = 50
+max_pages = 20
+
+[openclaw]
+mode = "command"
+wake_command = "python path/to/openclaw_bridge.py wake"
+cron_list_command = "python path/to/openclaw_bridge.py list-cron"
+cron_remove_command = "python path/to/openclaw_bridge.py remove-cron"
+cron_jobs_path = "./cron/jobs.json"
+wake_timeout_seconds = 120
+
+[schedule]
+eboss_daily_sync = "02:00"
+morning_work_analysis = "06:00"
+due_task_scan_minutes = 5
+workflow_reflection = "23:30"
+scheduler_tick_seconds = 30
+
+[runtime]
+home = "./salesbrain"
+db_path = "./salesbrain/salesbrain.sqlite"
+logs_dir = "./salesbrain/logs"

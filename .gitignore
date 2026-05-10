@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+.venv/
+.coverage
+dist/
+build/
+*.egg-info/
+*.pyc
+*.pyd
+*.log
+salesbrain.sqlite
+

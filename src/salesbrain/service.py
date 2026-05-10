@@ -1,0 +1,634 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta
+from typing import Any
+
+from .config import SalesBrainConfig
+from .db import SalesBrainStore
+from .eboss import EbossClient
+from .openclaw import OpenClawAdapter
+from .prompts import (
+    build_due_task_prompt,
+    build_morning_analysis_prompt,
+    build_workflow_reflection_prompt,
+)
+from .timeutil import iso_now, now_in_zone, parse_iso_datetime
+
+
+TASK_STATUSES = {"pending", "snoozed", "done", "cancelled"}
+TASK_PRIORITIES = {"low", "normal", "high", "urgent"}
+
+
+def _loads(value: Any, default: Any) -> Any:
+    if value is None:
+        return default
+    if isinstance(value, (dict, list)):
+        return value
+    try:
+        return json.loads(str(value))
+    except Exception:
+        return default
+
+
+def _decode_json_columns(row: dict[str, Any]) -> dict[str, Any]:
+    out = dict(row)
+    for key in list(out.keys()):
+        if key.endswith("_json") and isinstance(out[key], str):
+            out[key] = _loads(out[key], {} if key != "source_task_ids_json" else [])
+    return out
+
+
+def _first(record: dict[str, Any], keys: list[str]) -> str:
+    for key in keys:
+        value = record.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return ""
+
+
+def _compact_records(records: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    for record in records[:limit]:
+        payload = _loads(record.get("payload_json"), {})
+        compact.append(
+            {
+                "api_id": record.get("api_id"),
+                "object_type": record.get("object_type"),
+                "object_id": record.get("object_id"),
+                "object_name": record.get("object_name"),
+                "fetched_at": record.get("fetched_at"),
+                "payload": payload,
+            }
+        )
+    return compact
+
+
+def normalize_decision(raw: dict[str, Any]) -> dict[str, Any]:
+    if "decision" in raw and isinstance(raw["decision"], dict):
+        raw = raw["decision"]
+    elif "raw_output" in raw and isinstance(raw["raw_output"], str):
+        parsed = _loads(raw["raw_output"], None)
+        if isinstance(parsed, dict):
+            raw = parsed
+    decision = dict(raw)
+    for key in (
+        "tasks_to_create",
+        "tasks_to_update",
+        "review_suggestions",
+        "workflow_items",
+        "cron_jobs_to_remove",
+        "cron_jobs_to_keep",
+    ):
+        value = decision.get(key)
+        if not isinstance(value, list):
+            decision[key] = []
+    if "summary" not in decision:
+        decision["summary"] = str(raw.get("message") or raw.get("raw_output") or "")
+    return decision
+
+
+class SalesBrainService:
+    def __init__(
+        self,
+        config: SalesBrainConfig,
+        *,
+        store: SalesBrainStore | None = None,
+        eboss_client: EbossClient | None = None,
+        openclaw_adapter: OpenClawAdapter | None = None,
+    ):
+        self.config = config
+        self.store = store or SalesBrainStore(config.db_path)
+        self._eboss_client = eboss_client
+        self.openclaw = openclaw_adapter or OpenClawAdapter(config)
+
+    def close(self) -> None:
+        self.store.close()
+
+    def now_iso(self, now: datetime | None = None) -> str:
+        if now is not None:
+            return now.isoformat(timespec="seconds")
+        return iso_now(self.config.timezone)
+
+    def bootstrap(self) -> dict[str, Any]:
+        self.config.ensure_dirs()
+        self.store.init_schema()
+        now_iso = self.now_iso()
+        self.store.ensure_profile(
+            sales_name=self.config.sales_name or "unknown",
+            timezone=self.config.timezone,
+            now_iso=now_iso,
+        )
+        from .scheduler import SalesBrainScheduler
+
+        scheduler = SalesBrainScheduler(self, self.store, self.config)
+        scheduler.seed_default_jobs()
+        return {
+            "ok": True,
+            "home": str(self.config.home),
+            "db_path": str(self.config.db_path),
+            "profile": self.store.get_profile(),
+            "scheduler_jobs": self.store.list_scheduler_jobs(),
+        }
+
+    def _eboss(self) -> EbossClient:
+        if self._eboss_client is None:
+            if not self.config.eboss_api_key:
+                raise RuntimeError("missing_eboss_api_key")
+            self._eboss_client = EbossClient(
+                self.config.eboss_base_url,
+                self.config.eboss_api_key,
+                timeout=self.config.eboss_timeout_seconds,
+            )
+        return self._eboss_client
+
+    def get_profile(self) -> dict[str, Any]:
+        profile = self.store.get_profile() or {}
+        return {
+            "profile": profile,
+            "config": {
+                "home": str(self.config.home),
+                "db_path": str(self.config.db_path),
+                "timezone": self.config.timezone,
+                "eboss_base_url": self.config.eboss_base_url,
+                "openclaw_mode": self.config.openclaw_mode,
+            },
+        }
+
+    def sync_eboss(self, *, now: datetime | None = None) -> dict[str, Any]:
+        now = now or now_in_zone(self.config.timezone)
+        started_at = self.now_iso(now)
+        run_id = self.store.insert_sync_run(
+            run_type="eboss_sync",
+            started_at=started_at,
+            status="running",
+            payload_json={"sales_name": self.config.sales_name},
+        )
+        counts: dict[str, int] = {}
+        errors: list[dict[str, str]] = []
+        client = self._eboss()
+
+        def insert(api_id: str, object_type: str, records: list[dict[str, Any]]) -> None:
+            count = self.store.insert_raw_records(
+                sync_run_id=run_id,
+                api_id=api_id,
+                object_type=object_type,
+                records=records,
+                fetched_at=self.now_iso(now),
+            )
+            counts[object_type] = counts.get(object_type, 0) + count
+
+        try:
+            user_resp = client.call(
+                "get-user-by-name",
+                {
+                    "realName": self.config.sales_name,
+                    "current": "1",
+                    "size": "10",
+                    "status": "1",
+                },
+            )
+            users = user_resp.records
+            if not users:
+                raise RuntimeError(f"eboss_user_not_found: {self.config.sales_name}")
+            user = users[0]
+            user_id = _first(user, ["id", "userId", "user_id"])
+            real_name = _first(user, ["realName", "name", "userName"]) or self.config.sales_name
+            if not user_id:
+                raise RuntimeError("eboss_user_id_missing_in_get-user-by-name")
+            self.store.update_profile_eboss(
+                eboss_user_id=user_id,
+                eboss_real_name=real_name,
+                now_iso=self.now_iso(now),
+            )
+            insert("get-user-by-name", "user", users)
+        except Exception as exc:
+            finished_at = self.now_iso()
+            self.store.update_sync_run(
+                run_id,
+                status="failed",
+                finished_at=finished_at,
+                error=str(exc),
+                counts_json=counts,
+                payload_json={"errors": [{"api_id": "get-user-by-name", "error": str(exc)}]},
+            )
+            return {
+                "ok": False,
+                "run_id": run_id,
+                "status": "failed",
+                "error": str(exc),
+                "counts": counts,
+            }
+
+        start_date = (now - timedelta(days=30)).strftime("%Y-%m-%d 00:00:00")
+        end_date = now.strftime("%Y-%m-%d 23:59:59")
+        yesterday = (now - timedelta(days=1)).date().isoformat()
+        page_size = str(self.config.eboss_page_size)
+        sync_plan = [
+            (
+                "get-project-list",
+                "project",
+                {
+                    "current": "1",
+                    "size": page_size,
+                    "projectStatusList": "1,10,11,12",
+                    "sheet": "3",
+                    "projectManagerIds": user_id,
+                },
+                True,
+            ),
+            (
+                "get-opportunity-list",
+                "opportunity",
+                {
+                    "current": "1",
+                    "size": page_size,
+                    "optStateList": "1,2",
+                    "optTypeList": "1,2,3",
+                    "opportunity": "3",
+                    "chargerOpIdList": user_id,
+                },
+                True,
+            ),
+            (
+                "get-customer-list",
+                "customer",
+                {
+                    "current": "1",
+                    "size": page_size,
+                    "customerLifecycle": "1,2,3,4,5",
+                    "cust": "7",
+                    "chargeIdStr": user_id,
+                },
+                True,
+            ),
+            (
+                "get-lead-list",
+                "lead",
+                {
+                    "current": "1",
+                    "size": page_size,
+                    "leadStates": "1,2,3,6,7,8,9",
+                    "lead": "2",
+                    "assignUserIds": user_id,
+                },
+                True,
+            ),
+            (
+                "get-task-list",
+                "eboss_task",
+                {
+                    "current": "1",
+                    "size": page_size,
+                    "tabType": "1",
+                    "groupType": "1",
+                    "groupTypeIds": "2,1,7,8,9",
+                    "statusTypes": "2,1,7,8,9",
+                    "statuss": "5,1",
+                    "taskUserIds": user_id,
+                },
+                True,
+            ),
+            (
+                "get-follow-byuser",
+                "follow_record",
+                {
+                    "userId": user_id,
+                    "current": "1",
+                    "size": page_size,
+                    "startDate": start_date,
+                    "endDate": end_date,
+                },
+                True,
+            ),
+            (
+                "get-daily-report-self",
+                "daily_report",
+                {"queryDate": yesterday},
+                False,
+            ),
+        ]
+
+        successful = 0
+        for api_id, object_type, params, paginated in sync_plan:
+            try:
+                if paginated:
+                    records = client.call_paginated(
+                        api_id,
+                        params,
+                        max_pages=self.config.eboss_max_pages,
+                    )
+                else:
+                    records = client.call(api_id, params).records
+                insert(api_id, object_type, records)
+                successful += 1
+            except Exception as exc:
+                errors.append({"api_id": api_id, "error": str(exc)})
+
+        finished_at = self.now_iso()
+        status = "success"
+        if errors and successful:
+            status = "partial_failed"
+        elif errors and not successful:
+            status = "failed"
+        self.store.update_sync_run(
+            run_id,
+            status=status,
+            finished_at=finished_at,
+            error=json.dumps(errors, ensure_ascii=False) if errors else None,
+            counts_json=counts,
+            payload_json={"errors": errors, "user_id": user_id, "real_name": real_name},
+        )
+        return {
+            "ok": status != "failed",
+            "run_id": run_id,
+            "status": status,
+            "counts": counts,
+            "errors": errors,
+        }
+
+    def get_eboss_snapshot(self, limit: int = 50) -> dict[str, Any]:
+        latest_sync = self.store.latest_sync_run()
+        if latest_sync:
+            latest_sync = _decode_json_columns(latest_sync)
+        return {
+            "profile": self.store.get_profile(),
+            "latest_sync": latest_sync,
+            "records": _compact_records(self.store.latest_raw_records(limit), limit),
+            "local_tasks": [_decode_json_columns(item) for item in self.store.list_tasks(status="pending", limit=50)],
+            "open_review_suggestions": [
+                _decode_json_columns(item)
+                for item in self.store.list_review_suggestions(status="open", limit=20)
+            ],
+            "workflow_items": [
+                _decode_json_columns(item)
+                for item in self.store.list_workflow_items(limit=20)
+            ],
+        }
+
+    def search_eboss(self, keyword: str, limit: int = 20) -> dict[str, Any]:
+        return {
+            "keyword": keyword,
+            "records": _compact_records(self.store.search_raw_records(keyword, limit), limit),
+        }
+
+    def _validate_task_payload(self, task: dict[str, Any]) -> None:
+        if not str(task.get("title", "")).strip():
+            raise ValueError("task.title is required")
+        if not str(task.get("due_at", "")).strip():
+            raise ValueError("task.due_at is required")
+        parse_iso_datetime(str(task["due_at"]))
+        if task.get("remind_at"):
+            parse_iso_datetime(str(task["remind_at"]))
+        status = str(task.get("status", "pending"))
+        priority = str(task.get("priority", "normal"))
+        if status not in TASK_STATUSES:
+            raise ValueError(f"invalid_task_status: {status}")
+        if priority not in TASK_PRIORITIES:
+            raise ValueError(f"invalid_task_priority: {priority}")
+
+    def create_task(self, task: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+        payload = dict(task)
+        payload.setdefault("status", "pending")
+        payload.setdefault("priority", "normal")
+        payload.setdefault("created_by", "openclaw")
+        payload["now_iso"] = self.now_iso(now)
+        self._validate_task_payload(payload)
+        return _decode_json_columns(self.store.create_task(payload))
+
+    def update_task(self, task_id: str, updates: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any] | None:
+        if "due_at" in updates and updates["due_at"]:
+            parse_iso_datetime(str(updates["due_at"]))
+        if "remind_at" in updates and updates["remind_at"]:
+            parse_iso_datetime(str(updates["remind_at"]))
+        if "status" in updates and updates["status"] not in TASK_STATUSES:
+            raise ValueError(f"invalid_task_status: {updates['status']}")
+        if "priority" in updates and updates["priority"] not in TASK_PRIORITIES:
+            raise ValueError(f"invalid_task_priority: {updates['priority']}")
+        result = self.store.update_task(task_id, updates, now_iso=self.now_iso(now))
+        return _decode_json_columns(result) if result else None
+
+    def list_tasks(self, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        return [_decode_json_columns(item) for item in self.store.list_tasks(status=status, limit=limit)]
+
+    def list_review_suggestions(self, status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        return [_decode_json_columns(item) for item in self.store.list_review_suggestions(status=status, limit=limit)]
+
+    def list_workflow_items(self, limit: int = 100) -> list[dict[str, Any]]:
+        return [_decode_json_columns(item) for item in self.store.list_workflow_items(limit=limit)]
+
+    def list_wake_runs(self, limit: int = 100) -> list[dict[str, Any]]:
+        return [_decode_json_columns(item) for item in self.store.list_wake_runs(limit=limit)]
+
+    def list_scheduler_jobs(self) -> list[dict[str, Any]]:
+        return [_decode_json_columns(item) for item in self.store.list_scheduler_jobs()]
+
+    def list_due_tasks(self, *, now: datetime | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        return [
+            _decode_json_columns(item)
+            for item in self.store.list_due_tasks(self.now_iso(now), limit=limit)
+        ]
+
+    def create_review_suggestion(self, suggestion: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+        payload = dict(suggestion)
+        payload["now_iso"] = self.now_iso(now)
+        if not str(payload.get("title", "")).strip():
+            raise ValueError("review_suggestion.title is required")
+        if not str(payload.get("suggestion", "")).strip():
+            raise ValueError("review_suggestion.suggestion is required")
+        return _decode_json_columns(self.store.create_review_suggestion(payload))
+
+    def record_workflow(self, item: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+        payload = dict(item)
+        payload["now_iso"] = self.now_iso(now)
+        for key in ("title", "pattern_type", "summary"):
+            if not str(payload.get(key, "")).strip():
+                raise ValueError(f"workflow.{key} is required")
+        return _decode_json_columns(self.store.record_workflow(payload))
+
+    def record_wake_result(self, wake: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+        payload = dict(wake)
+        payload.setdefault("started_at", self.now_iso(now))
+        payload.setdefault("finished_at", self.now_iso(now))
+        payload.setdefault("status", "success")
+        payload.setdefault("wake_type", "manual")
+        return _decode_json_columns(self.store.record_wake_run(payload))
+
+    def apply_openclaw_decision(
+        self,
+        decision: dict[str, Any],
+        *,
+        source_kind: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        normalized = normalize_decision(decision)
+        created_tasks: list[dict[str, Any]] = []
+        updated_tasks: list[dict[str, Any] | None] = []
+        review_suggestions: list[dict[str, Any]] = []
+        workflow_items: list[dict[str, Any]] = []
+        removed_cron_jobs: list[dict[str, Any]] = []
+        errors: list[dict[str, str]] = []
+
+        for task in normalized["tasks_to_create"]:
+            if not isinstance(task, dict):
+                continue
+            payload = dict(task)
+            payload.setdefault("source_type", source_kind)
+            try:
+                created_tasks.append(self.create_task(payload, now=now))
+            except Exception as exc:
+                errors.append({"action": "create_task", "error": str(exc), "payload": json.dumps(payload, ensure_ascii=False)})
+
+        for task_update in normalized["tasks_to_update"]:
+            if not isinstance(task_update, dict) or not task_update.get("id"):
+                continue
+            task_id = str(task_update["id"])
+            updates = {k: v for k, v in task_update.items() if k != "id"}
+            try:
+                updated_tasks.append(self.update_task(task_id, updates, now=now))
+            except Exception as exc:
+                errors.append({"action": "update_task", "error": str(exc), "task_id": task_id})
+
+        for suggestion in normalized["review_suggestions"]:
+            if not isinstance(suggestion, dict):
+                continue
+            payload = dict(suggestion)
+            payload.setdefault("source_type", source_kind)
+            try:
+                review_suggestions.append(self.create_review_suggestion(payload, now=now))
+            except Exception as exc:
+                errors.append({"action": "create_review_suggestion", "error": str(exc)})
+
+        for item in normalized["workflow_items"]:
+            if not isinstance(item, dict):
+                continue
+            try:
+                workflow_items.append(self.record_workflow(item, now=now))
+            except Exception as exc:
+                errors.append({"action": "record_workflow", "error": str(exc)})
+
+        for job_id in normalized["cron_jobs_to_remove"]:
+            job_id = str(job_id)
+            if not job_id:
+                continue
+            try:
+                removed = self.openclaw.remove_cron_job(job_id)
+                removed_cron_jobs.append({"job_id": job_id, "removed": removed})
+            except Exception as exc:
+                errors.append({"action": "remove_cron_job", "error": str(exc), "job_id": job_id})
+
+        return {
+            "summary": normalized.get("summary", ""),
+            "created_tasks": created_tasks,
+            "updated_tasks": updated_tasks,
+            "review_suggestions": review_suggestions,
+            "workflow_items": workflow_items,
+            "removed_cron_jobs": removed_cron_jobs,
+            "errors": errors,
+        }
+
+    def _wake_openclaw(
+        self,
+        *,
+        kind: str,
+        prompt: str,
+        context: dict[str, Any],
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        now = now or now_in_zone(self.config.timezone)
+        wake = self.store.record_wake_run(
+            {
+                "wake_type": kind,
+                "started_at": self.now_iso(now),
+                "status": "running",
+                "input_summary": kind,
+                "payload_json": {"context_preview_keys": sorted(context.keys())},
+            }
+        )
+        try:
+            result = self.openclaw.wake(
+                kind,
+                {
+                    "run_id": wake["id"],
+                    "prompt": prompt,
+                    "context": context,
+                },
+            )
+            applied = self.apply_openclaw_decision(result.raw, source_kind=kind, now=now)
+            finished = self.store.update_wake_run(
+                wake["id"],
+                {
+                    "finished_at": self.now_iso(),
+                    "status": "success" if result.ok and not applied["errors"] else "failed",
+                    "result_summary": applied.get("summary") or result.summary,
+                    "error": json.dumps(applied["errors"], ensure_ascii=False) if applied["errors"] else None,
+                    "payload_json": {
+                        "openclaw_result": result.raw,
+                        "applied": applied,
+                    },
+                },
+            )
+            return {
+                "ok": result.ok,
+                "wake_run": _decode_json_columns(finished or wake),
+                "openclaw_result": result.raw,
+                "applied": applied,
+            }
+        except Exception as exc:
+            finished = self.store.update_wake_run(
+                wake["id"],
+                {
+                    "finished_at": self.now_iso(),
+                    "status": "failed",
+                    "error": str(exc),
+                    "payload_json": {"error_type": type(exc).__name__},
+                },
+            )
+            return {"ok": False, "wake_run": _decode_json_columns(finished or wake), "error": str(exc)}
+
+    def morning_analysis(self, *, now: datetime | None = None) -> dict[str, Any]:
+        context = {
+            "profile": self.store.get_profile(),
+            "snapshot": self.get_eboss_snapshot(limit=50),
+            "pending_tasks": self.list_tasks(status="pending", limit=50),
+        }
+        prompt = build_morning_analysis_prompt(context)
+        return self._wake_openclaw(kind="morning_analysis", prompt=prompt, context=context, now=now)
+
+    def scan_due_tasks(self, *, now: datetime | None = None) -> dict[str, Any]:
+        due_tasks = self.list_due_tasks(now=now, limit=20)
+        if not due_tasks:
+            wake = self.record_wake_result(
+                {
+                    "wake_type": "due_task_scan",
+                    "status": "skipped",
+                    "input_summary": "no due tasks",
+                    "result_summary": "no due tasks",
+                    "payload_json": {},
+                },
+                now=now,
+            )
+            return {"ok": True, "skipped": True, "wake_run": wake}
+        context = {
+            "profile": self.store.get_profile(),
+            "due_tasks": due_tasks,
+            "snapshot": self.get_eboss_snapshot(limit=30),
+        }
+        prompt = build_due_task_prompt(context)
+        return self._wake_openclaw(kind="due_task_scan", prompt=prompt, context=context, now=now)
+
+    def workflow_reflection(self, *, now: datetime | None = None) -> dict[str, Any]:
+        cron_jobs = self.openclaw.list_cron_jobs()
+        context = {
+            "profile": self.store.get_profile(),
+            "pending_tasks": self.list_tasks(status="pending", limit=100),
+            "snapshot": self.get_eboss_snapshot(limit=50),
+            "openclaw_cron_jobs": cron_jobs,
+            "business_cron_candidates": self.openclaw.filter_business_cron_jobs(cron_jobs),
+            "existing_workflow_items": [
+                _decode_json_columns(item)
+                for item in self.store.list_workflow_items(limit=50)
+            ],
+        }
+        prompt = build_workflow_reflection_prompt(context)
+        return self._wake_openclaw(kind="workflow_reflection", prompt=prompt, context=context, now=now)
