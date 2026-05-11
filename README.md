@@ -5,10 +5,12 @@ SalesBrain is a local-first scheduler and state layer for Openclaw-based sales m
 What it does:
 
 - syncs EBOSS data into SQLite
+- backfills the last 30 days of EBOSS daily reports on first successful sync
 - tracks follow-up tasks, review suggestions, and workflow patterns
 - wakes Openclaw on a fixed schedule
 - applies Openclaw's structured decisions
 - can inspect Openclaw cron jobs and migrate business tasks into SalesBrain
+- checks GitHub daily and wakes Openclaw to ask before updating SalesBrain
 
 SalesBrain is intentionally not an AI model. Openclaw does the thinking.
 
@@ -21,6 +23,8 @@ python -m pip install -e .
 salesbrain init --sales-name "张三"
 salesbrain daemon
 ```
+
+`salesbrain init` prompts for the EBOSS `api-key` value if it is not supplied by `--eboss-api-key` or `EBOSS_API_KEY`.
 
 Or create a local config from the included template:
 
@@ -38,6 +42,8 @@ salesbrain eboss sync
 salesbrain wake morning
 salesbrain wake due
 salesbrain wake workflow
+salesbrain github check
+salesbrain github mark-installed
 salesbrain tasks list
 salesbrain tasks due
 ```

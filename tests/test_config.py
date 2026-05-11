@@ -24,3 +24,6 @@ def test_write_and_load_config_uses_local_paths(tmp_path, monkeypatch):
     assert cfg.openclaw_cron_jobs_path == (tmp_path / "cron" / "jobs.json").resolve()
     assert cfg.eboss_api_key == "secret-key"
     assert cfg.eboss_api_key_file == secret_file.resolve()
+    assert cfg.github_repo == "FrankeyQu/SalesBrain"
+    assert cfg.github_branch == "main"
+    assert cfg.github_update_check_time == "09:00"

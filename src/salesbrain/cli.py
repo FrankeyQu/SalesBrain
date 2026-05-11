@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import getpass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -56,21 +58,33 @@ def _parse_updates(values: list[str]) -> dict[str, Any]:
     return updates
 
 
+def _prompt_eboss_api_key() -> str:
+    if not sys.stdin.isatty():
+        raise RuntimeError("missing_eboss_api_key")
+    value = getpass.getpass("请输入 EBOSS API Key (api-key header): ").strip()
+    if not value:
+        raise RuntimeError("missing_eboss_api_key")
+    return value
+
+
 def cmd_init(args: argparse.Namespace) -> dict[str, Any]:
     config_path = Path(args.config) if args.config else default_config_path()
     if config_path.exists() and not args.force:
         raise FileExistsError(f"config_exists: {config_path}")
     sales_name = args.sales_name or "unknown"
+    eboss_api_key = (args.eboss_api_key or "").strip() or os.getenv("EBOSS_API_KEY", "").strip()
+    if not eboss_api_key:
+        eboss_api_key = _prompt_eboss_api_key()
     write_default_config(
         config_path,
         sales_name=sales_name,
         timezone=args.timezone,
         eboss_base_url=args.eboss_base_url,
     )
-    if args.eboss_api_key:
+    if eboss_api_key:
         secret_file = config_path.parent / "secrets" / "eboss-api-key.txt"
         secret_file.parent.mkdir(parents=True, exist_ok=True)
-        secret_file.write_text(args.eboss_api_key.strip(), encoding="utf-8")
+        secret_file.write_text(eboss_api_key, encoding="utf-8")
     result = _run_with_service(str(config_path), lambda service: service.bootstrap(), bootstrap=False)
     result["config_path"] = str(config_path.resolve())
     return result
@@ -172,6 +186,17 @@ def cmd_tasks_update(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
+def cmd_github_check(args: argparse.Namespace) -> dict[str, Any]:
+    return _run_with_service(args.config, lambda service: service.github_update_check())
+
+
+def cmd_github_mark_installed(args: argparse.Namespace) -> dict[str, Any]:
+    def _run(service: SalesBrainService) -> dict[str, Any]:
+        return service.github_mark_installed(args.sha or None)
+
+    return _run_with_service(args.config, _run)
+
+
 def cmd_tasks_set_status(status: str) -> Callable[[argparse.Namespace], dict[str, Any]]:
     def _runner(args: argparse.Namespace) -> dict[str, Any]:
         updates: dict[str, Any] = {"status": status}
@@ -262,6 +287,14 @@ def build_parser() -> argparse.ArgumentParser:
         task_status.add_argument("--priority", default=None, choices=["low", "normal", "high", "urgent"])
         task_status.add_argument("--description", default=None)
         task_status.set_defaults(func=cmd_tasks_set_status(status))
+
+    github = sub.add_parser("github", parents=[common], help="GitHub update workflow")
+    github_sub = github.add_subparsers(dest="github_command", required=True)
+    github_check = github_sub.add_parser("check", parents=[common], help="Check whether GitHub has a newer SalesBrain commit")
+    github_check.set_defaults(func=cmd_github_check)
+    github_mark = github_sub.add_parser("mark-installed", parents=[common], help="Mark the currently installed commit as up to date")
+    github_mark.add_argument("--sha", default=None, help="Explicit commit SHA to record")
+    github_mark.set_defaults(func=cmd_github_mark_installed)
 
     return parser
 

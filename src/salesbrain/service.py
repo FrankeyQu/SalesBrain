@@ -7,8 +7,10 @@ from typing import Any
 from .config import SalesBrainConfig
 from .db import SalesBrainStore
 from .eboss import EbossClient
+from .github import compare_commit_ids, fetch_remote_commit
 from .openclaw import OpenClawAdapter
 from .prompts import (
+    build_github_update_prompt,
     build_due_task_prompt,
     build_morning_analysis_prompt,
     build_workflow_reflection_prompt,
@@ -18,6 +20,11 @@ from .timeutil import iso_now, now_in_zone, parse_iso_datetime
 
 TASK_STATUSES = {"pending", "snoozed", "done", "cancelled"}
 TASK_PRIORITIES = {"low", "normal", "high", "urgent"}
+GITHUB_INSTALLED_REVISION_KEY = "github_installed_revision"
+GITHUB_LAST_CHECKED_REVISION_KEY = "github_last_checked_revision"
+GITHUB_LAST_CHECKED_AT_KEY = "github_last_checked_at"
+GITHUB_LAST_PROMPTED_REVISION_KEY = "github_last_prompted_revision"
+GITHUB_BACKFILL_DONE_KEY = "eboss_daily_report_backfill_done"
 
 
 def _loads(value: Any, default: Any) -> Any:
@@ -123,12 +130,14 @@ class SalesBrainService:
 
         scheduler = SalesBrainScheduler(self, self.store, self.config)
         scheduler.seed_default_jobs()
+        github_state = self.ensure_github_baseline()
         return {
             "ok": True,
             "home": str(self.config.home),
             "db_path": str(self.config.db_path),
             "profile": self.store.get_profile(),
             "scheduler_jobs": self.store.list_scheduler_jobs(),
+            "github_state": github_state,
         }
 
     def _eboss(self) -> EbossClient:
@@ -152,7 +161,64 @@ class SalesBrainService:
                 "timezone": self.config.timezone,
                 "eboss_base_url": self.config.eboss_base_url,
                 "openclaw_mode": self.config.openclaw_mode,
+                "github_repo": self.config.github_repo,
+                "github_branch": self.config.github_branch,
             },
+            "github_state": self.get_github_state(),
+        }
+
+    def get_github_state(self) -> dict[str, Any]:
+        return {
+            "repo": self.config.github_repo,
+            "branch": self.config.github_branch,
+            "update_check_time": self.config.github_update_check_time,
+            "installed_revision": self.store.get_state(GITHUB_INSTALLED_REVISION_KEY),
+            "last_checked_revision": self.store.get_state(GITHUB_LAST_CHECKED_REVISION_KEY),
+            "last_checked_at": self.store.get_state(GITHUB_LAST_CHECKED_AT_KEY),
+            "last_prompted_revision": self.store.get_state(GITHUB_LAST_PROMPTED_REVISION_KEY),
+        }
+
+    def _fetch_github_commit(self) -> dict[str, Any]:
+        commit = fetch_remote_commit(
+            self.config.github_repo,
+            self.config.github_branch,
+            timeout=self.config.github_timeout_seconds,
+        )
+        return {
+            "repo": commit.repo,
+            "branch": commit.branch,
+            "sha": commit.sha,
+            "html_url": commit.html_url,
+            "commit_url": commit.commit_url,
+            "message": commit.message,
+            "author": commit.author,
+        }
+
+    def ensure_github_baseline(self, *, now: datetime | None = None) -> dict[str, Any]:
+        now_iso = self.now_iso(now)
+        installed = self.store.get_state(GITHUB_INSTALLED_REVISION_KEY)
+        if installed:
+            return {
+                "ok": True,
+                "baseline_missing": False,
+                "installed_revision": installed,
+            }
+        try:
+            commit = self._fetch_github_commit()
+        except Exception as exc:
+            return {
+                "ok": False,
+                "baseline_missing": True,
+                "error": str(exc),
+            }
+        self.store.set_state(GITHUB_INSTALLED_REVISION_KEY, commit["sha"], now_iso=now_iso)
+        self.store.set_state(GITHUB_LAST_CHECKED_REVISION_KEY, commit["sha"], now_iso=now_iso)
+        self.store.set_state(GITHUB_LAST_CHECKED_AT_KEY, now_iso, now_iso=now_iso)
+        return {
+            "ok": True,
+            "baseline_missing": True,
+            "installed_revision": commit["sha"],
+            "remote_revision": commit["sha"],
         }
 
     def sync_eboss(self, *, now: datetime | None = None) -> dict[str, Any]:
@@ -177,6 +243,20 @@ class SalesBrainService:
                 fetched_at=self.now_iso(now),
             )
             counts[object_type] = counts.get(object_type, 0) + count
+
+        def insert_daily_report(query_date: str, payload: dict[str, Any]) -> None:
+            if self.store.raw_record_exists(object_type="daily_report", object_id=query_date):
+                return
+            self.store.insert_raw_record(
+                sync_run_id=run_id,
+                api_id="get-daily-report-self",
+                object_type="daily_report",
+                object_id=query_date,
+                object_name=query_date,
+                payload=payload,
+                fetched_at=self.now_iso(now),
+            )
+            counts["daily_report"] = counts.get("daily_report", 0) + 1
 
         try:
             user_resp = client.call(
@@ -222,7 +302,6 @@ class SalesBrainService:
 
         start_date = (now - timedelta(days=30)).strftime("%Y-%m-%d 00:00:00")
         end_date = now.strftime("%Y-%m-%d 23:59:59")
-        yesterday = (now - timedelta(days=1)).date().isoformat()
         page_size = str(self.config.eboss_page_size)
         sync_plan = [
             (
@@ -301,12 +380,6 @@ class SalesBrainService:
                 },
                 True,
             ),
-            (
-                "get-daily-report-self",
-                "daily_report",
-                {"queryDate": yesterday},
-                False,
-            ),
         ]
 
         successful = 0
@@ -324,6 +397,27 @@ class SalesBrainService:
                 successful += 1
             except Exception as exc:
                 errors.append({"api_id": api_id, "error": str(exc)})
+
+        if self.store.get_state(GITHUB_BACKFILL_DONE_KEY) != "1":
+            backfill_errors = 0
+            backfill_success = 0
+            for offset in range(29, -1, -1):
+                query_date = (now - timedelta(days=offset)).date().isoformat()
+                try:
+                    response = client.call("get-daily-report-self", {"queryDate": query_date})
+                    records = response.records
+                    if not records:
+                        records = [dict(response.raw)]
+                    for record in records:
+                        payload = dict(record)
+                        payload["salesbrain_query_date"] = query_date
+                        insert_daily_report(query_date, payload)
+                    backfill_success += 1
+                except Exception as exc:
+                    backfill_errors += 1
+                    errors.append({"api_id": "get-daily-report-self", "queryDate": query_date, "error": str(exc)})
+            if backfill_errors == 0 and backfill_success == 30:
+                self.store.set_state(GITHUB_BACKFILL_DONE_KEY, "1", now_iso=self.now_iso(now))
 
         finished_at = self.now_iso()
         status = "success"
@@ -345,6 +439,113 @@ class SalesBrainService:
             "status": status,
             "counts": counts,
             "errors": errors,
+        }
+
+    def github_update_check(self, *, now: datetime | None = None) -> dict[str, Any]:
+        now = now or now_in_zone(self.config.timezone)
+        now_iso = self.now_iso(now)
+        try:
+            remote = self._fetch_github_commit()
+        except Exception as exc:
+            wake = self.record_wake_result(
+                {
+                    "wake_type": "github_update_check",
+                    "status": "failed",
+                    "input_summary": "github update check failed",
+                    "result_summary": "github update check failed",
+                    "error": str(exc),
+                    "payload_json": {"repo": self.config.github_repo, "branch": self.config.github_branch},
+                },
+                now=now,
+            )
+            return {"ok": False, "wake_run": wake, "error": str(exc)}
+
+        installed = self.store.get_state(GITHUB_INSTALLED_REVISION_KEY)
+        comparison = compare_commit_ids(installed, remote["sha"])
+        self.store.set_state(GITHUB_LAST_CHECKED_REVISION_KEY, remote["sha"], now_iso=now_iso)
+        self.store.set_state(GITHUB_LAST_CHECKED_AT_KEY, now_iso, now_iso=now_iso)
+
+        if comparison["baseline_missing"]:
+            self.store.set_state(GITHUB_INSTALLED_REVISION_KEY, remote["sha"], now_iso=now_iso)
+            wake = self.record_wake_result(
+                {
+                    "wake_type": "github_update_check",
+                    "status": "skipped",
+                    "input_summary": "baseline established",
+                    "result_summary": "baseline established",
+                    "payload_json": {
+                        "repo": self.config.github_repo,
+                        "branch": self.config.github_branch,
+                        "remote_revision": remote["sha"],
+                    },
+                },
+                now=now,
+            )
+            return {
+                "ok": True,
+                "up_to_date": True,
+                "baseline_missing": True,
+                "wake_run": wake,
+                "github": remote,
+            }
+
+        if not comparison["update_available"]:
+            wake = self.record_wake_result(
+                {
+                    "wake_type": "github_update_check",
+                    "status": "skipped",
+                    "input_summary": "already up to date",
+                    "result_summary": "SalesBrain is already up to date.",
+                    "payload_json": {
+                        "repo": self.config.github_repo,
+                        "branch": self.config.github_branch,
+                        "remote_revision": remote["sha"],
+                        "installed_revision": installed,
+                    },
+                },
+                now=now,
+            )
+            return {
+                "ok": True,
+                "up_to_date": True,
+                "wake_run": wake,
+                "github": remote,
+            }
+
+        context = {
+            "repo": self.config.github_repo,
+            "branch": self.config.github_branch,
+            "installed_revision": installed,
+            "remote_revision": remote["sha"],
+            "remote_commit": remote,
+        }
+        prompt = build_github_update_prompt(context)
+        result = self._wake_openclaw(kind="github_update_check", prompt=prompt, context=context, now=now)
+        self.store.set_state(GITHUB_LAST_PROMPTED_REVISION_KEY, remote["sha"], now_iso=now_iso)
+        return {
+            "ok": result["ok"],
+            "update_available": True,
+            "wake_run": result["wake_run"],
+            "openclaw_result": result["openclaw_result"],
+            "applied": result["applied"],
+            "github": remote,
+        }
+
+    def github_mark_installed(self, sha: str | None = None, *, now: datetime | None = None) -> dict[str, Any]:
+        now = now or now_in_zone(self.config.timezone)
+        now_iso = self.now_iso(now)
+        remote = None
+        if sha is None:
+            remote = self._fetch_github_commit()
+            sha = remote["sha"]
+        self.store.set_state(GITHUB_INSTALLED_REVISION_KEY, sha, now_iso=now_iso)
+        if remote is not None:
+            self.store.set_state(GITHUB_LAST_CHECKED_REVISION_KEY, remote["sha"], now_iso=now_iso)
+            self.store.set_state(GITHUB_LAST_CHECKED_AT_KEY, now_iso, now_iso=now_iso)
+        return {
+            "ok": True,
+            "installed_revision": sha,
+            "github": remote,
         }
 
     def get_eboss_snapshot(self, limit: int = 50) -> dict[str, Any]:

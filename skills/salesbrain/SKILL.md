@@ -1,12 +1,12 @@
 ---
 name: salesbrain
-description: "Use SalesBrain to run Openclaw sales mentoring. Use when SalesBrain wakes you for morning analysis, due task follow-up, workflow reflection, EBOSS sync review, or cron migration. Return structured JSON only."
+description: "Use SalesBrain to run Openclaw sales mentoring. Use when SalesBrain wakes you for morning analysis, due task follow-up, workflow reflection, EBOSS sync review, GitHub update checks, or cron migration. Return structured JSON only."
 allowed-tools: Bash
 metadata:
   clawdbot:
     emoji: "🧠"
     requires:
-      bins: ["salesbrain"]
+      bins: ["salesbrain", "git", "python"]
       os: ["linux", "darwin", "win32"]
     configPaths:
       - "~/.openclaw/"
@@ -27,6 +27,7 @@ Use this skill whenever SalesBrain wakes you with one of these kinds:
 - `morning_analysis`
 - `due_task_scan`
 - `workflow_reflection`
+- `github_update_check`
 - `manual`
 
 Use it whenever you need to:
@@ -35,6 +36,42 @@ Use it whenever you need to:
 - decide what to remind, snooze, complete, or keep
 - extract reusable working patterns
 - identify business cron jobs that should move out of Openclaw
+- ask the user whether to update SalesBrain when GitHub has a newer commit
+
+## First Use Bootstrap
+
+When this skill is installed but the `salesbrain` command is missing, deploy SalesBrain from GitHub before continuing.
+
+Use the official repo:
+
+```bash
+git clone https://github.com/FrankeyQu/SalesBrain.git ~/.openclaw/SalesBrain
+cd ~/.openclaw/SalesBrain
+python -m pip install -e .
+```
+
+If the directory already exists:
+
+```bash
+cd ~/.openclaw/SalesBrain
+git pull
+python -m pip install -e .
+```
+
+Then initialize it:
+
+```bash
+salesbrain init --sales-name "<sales name>"
+```
+
+During initialization, ask the user for the EBOSS API key if SalesBrain prompts for it.
+This is the value used in the EBOSS `api-key` HTTP header.
+
+After a successful install or update, mark the installed revision:
+
+```bash
+salesbrain github mark-installed
+```
 
 ## Required Inputs
 
@@ -116,6 +153,29 @@ Return:
 - workflow items worth learning
 - business cron jobs that should move to SalesBrain
 - any tasks that should be preserved or updated before the cron is removed
+
+### `github_update_check`
+
+SalesBrain found a newer commit in the GitHub repository.
+
+Return a direct user-facing question in `summary`, for example:
+
+```json
+{
+  "ok": true,
+  "summary": "SalesBrain 有新版本，是否现在更新？",
+  "tasks_to_create": [],
+  "tasks_to_update": [],
+  "review_suggestions": [],
+  "workflow_items": [],
+  "cron_jobs_to_remove": [],
+  "cron_jobs_to_keep": [],
+  "notes": "Wait for user confirmation before updating."
+}
+```
+
+Do not run `git pull` or update automatically unless the user explicitly agrees.
+If the user agrees, update the local SalesBrain checkout and then run `salesbrain github mark-installed`.
 
 ## Response Shape Notes
 

@@ -34,6 +34,12 @@ DEFAULT_JOB_SPECS = [
         "schedule_kind": "daily_time",
         "schedule_value": "23:30",
     },
+    {
+        "job_name": "github_update_check",
+        "handler_name": "github_update_check",
+        "schedule_kind": "daily_time",
+        "schedule_value": "09:00",
+    },
 ]
 
 
@@ -43,6 +49,7 @@ def job_specs_from_config(config: SalesBrainConfig) -> list[dict[str, str]]:
         {**DEFAULT_JOB_SPECS[1], "schedule_value": config.morning_analysis_time},
         {**DEFAULT_JOB_SPECS[2], "schedule_value": str(config.due_task_scan_minutes)},
         {**DEFAULT_JOB_SPECS[3], "schedule_value": config.workflow_reflection_time},
+        {**DEFAULT_JOB_SPECS[4], "schedule_value": config.github_update_check_time},
     ]
 
 
@@ -98,7 +105,7 @@ class SalesBrainScheduler:
                 handler_name = str(job["handler_name"])
                 handler = getattr(self.service, handler_name)
                 detail = handler(now=now)
-                status = "success"
+                status = "failed" if isinstance(detail, dict) and detail.get("ok") is False else "success"
             except Exception as exc:
                 handler_name = str(job["handler_name"])
                 detail = {"ok": False, "error": type(exc).__name__, "message": str(exc)}

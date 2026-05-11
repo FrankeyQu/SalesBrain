@@ -24,6 +24,12 @@ due_task_scan_minutes = 5
 workflow_reflection = "23:30"
 scheduler_tick_seconds = 30
 
+[github]
+repo = "FrankeyQu/SalesBrain"
+branch = "main"
+update_check_time = "09:00"
+timeout_seconds = 30
+
 [runtime]
 home = "./salesbrain"
 db_path = "./salesbrain/salesbrain.sqlite"

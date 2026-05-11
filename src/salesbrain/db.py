@@ -118,6 +118,12 @@ CREATE TABLE IF NOT EXISTS scheduler_jobs (
   enabled INTEGER NOT NULL DEFAULT 1,
   payload_json TEXT NOT NULL DEFAULT '{}'
 );
+
+CREATE TABLE IF NOT EXISTS app_state (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 """
 
 
@@ -670,6 +676,52 @@ class SalesBrainStore:
             "SELECT * FROM scheduler_jobs ORDER BY next_run_at ASC, job_name ASC"
         ).fetchall()
         return rows_to_dicts(rows)
+
+    def set_state(self, key: str, value: str, *, now_iso: str) -> None:
+        with self.transaction():
+            self.conn.execute(
+                """
+                INSERT INTO app_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                  value = excluded.value,
+                  updated_at = excluded.updated_at
+                """,
+                (key, value, now_iso),
+            )
+
+    def get_state(self, key: str) -> str | None:
+        row = self.conn.execute(
+            "SELECT value FROM app_state WHERE key = ?",
+            (key,),
+        ).fetchone()
+        return None if row is None else str(row["value"])
+
+    def delete_state(self, key: str) -> None:
+        with self.transaction():
+            self.conn.execute("DELETE FROM app_state WHERE key = ?", (key,))
+
+    def count_raw_records(self, object_type: str | None = None) -> int:
+        if object_type is None:
+            row = self.conn.execute("SELECT COUNT(*) AS count FROM eboss_raw_records").fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS count FROM eboss_raw_records WHERE object_type = ?",
+                (object_type,),
+            ).fetchone()
+        return int(row["count"] if row is not None else 0)
+
+    def raw_record_exists(self, *, object_type: str, object_id: str) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM eboss_raw_records
+            WHERE object_type = ? AND object_id = ?
+            LIMIT 1
+            """,
+            (object_type, object_id),
+        ).fetchone()
+        return row is not None
 
     def get_scheduler_job(self, job_name: str) -> dict[str, Any] | None:
         row = self.conn.execute(

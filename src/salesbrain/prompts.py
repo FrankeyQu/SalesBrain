@@ -113,3 +113,14 @@ def build_workflow_reflection_prompt(context: dict[str, Any]) -> str:
         + "- also return workflow_items for reusable methods worth keeping\n"
     )
 
+
+def build_github_update_prompt(context: dict[str, Any]) -> str:
+    prompt = _base_prompt("SalesBrain GitHub update check", context)
+    return (
+        prompt
+        + "\n\nFocus:\n"
+        + "- if the remote GitHub revision is newer than the installed revision, ask the user whether to update now\n"
+        + "- keep the summary as the exact user-facing question when an update is available\n"
+        + "- if already up to date, say so briefly in the summary\n"
+        + "- do not create tasks unless an update workflow itself needs tracking\n"
+    )

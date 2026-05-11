@@ -31,6 +31,8 @@ Recommended response shape:
 }
 ```
 
+For `github_update_check`, the `summary` should be a direct question asking the user whether to update SalesBrain. The bridge must not update code without user confirmation.
+
 ## Cron listing command
 
 Return one of these on stdout:
