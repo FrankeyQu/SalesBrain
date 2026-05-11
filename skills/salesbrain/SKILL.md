@@ -42,7 +42,11 @@ Use it whenever you need to:
 - identify business cron jobs that should move out of Openclaw
 - ask the user whether to update SalesBrain when GitHub has a newer commit
 
-## First Use Bootstrap and GitHub Sync
+## Self-Bootstrap and Source of Truth
+
+This skill is the user-facing installer and operating contract for SalesBrain.
+The GitHub repository is the source of truth for the code and reference docs.
+A separate bridge file does not need to be distributed to Openclaw as long as this skill can clone the repo first.
 
 The first step after this skill is installed is always to sync the SalesBrain code from GitHub.
 Do not analyze anything, do not initialize anything, and do not assume the local checkout exists until this sync is done.
@@ -88,6 +92,13 @@ When the user later asks for an update, repeat the same sync-first sequence:
 2. `git pull --ff-only`
 3. `python -m pip install -e .`
 4. `salesbrain github mark-installed`
+
+Openclaw already knows how to use SalesBrain because this skill contains:
+
+- the bootstrap order
+- the wake kinds
+- the JSON input and output contract
+- the rules for creating tasks, suggestions, workflow items, and cron removals
 
 ## Required Inputs
 

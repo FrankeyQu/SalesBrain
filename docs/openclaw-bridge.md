@@ -3,6 +3,9 @@
 SalesBrain does not hardcode a specific Openclaw install path.
 Instead, it calls a user-provided command and expects JSON on stdout.
 
+This reference can live in the SalesBrain GitHub repository.
+A separate copy does not need to be delivered to Openclaw as long as the skill can clone the repo first.
+
 ## First install sequence
 
 When this skill is installed on a fresh machine, the first step is to sync the SalesBrain repo from GitHub before any analysis:
