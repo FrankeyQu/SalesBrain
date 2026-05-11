@@ -43,3 +43,26 @@ def test_compute_next_run_for_daily_and_interval():
     assert compute_next_run(fixed_now, "daily_time", "07:00").isoformat(timespec="seconds") == "2026-05-11T07:00:00+08:00"
     assert compute_next_run(fixed_now, "daily_time", "05:00").isoformat(timespec="seconds") == "2026-05-12T05:00:00+08:00"
     assert compute_next_run(fixed_now, "interval_minutes", "5").isoformat(timespec="seconds") == "2026-05-11T06:05:00+08:00"
+
+
+def test_compute_next_run_for_weekly():
+    fixed_now = datetime(2026, 5, 11, 6, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    assert compute_next_run(fixed_now, "weekly_day_time", "fri 17:30").isoformat(timespec="seconds") == "2026-05-15T17:30:00+08:00"
+
+
+def test_scheduler_seeds_followup_review_and_weekly_jobs(tmp_path):
+    config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")
+    cfg = load_config(config_path)
+    store = SalesBrainStore(tmp_path / "salesbrain.sqlite")
+    store.init_schema()
+
+    scheduler = SalesBrainScheduler(SimpleNamespace(), store, cfg)
+    scheduler.seed_default_jobs()
+
+    jobs = {job["job_name"]: job for job in store.list_scheduler_jobs()}
+    assert "work_followup_0830" in jobs
+    assert "work_followup_1330" in jobs
+    assert "work_followup_1930" in jobs
+    assert "daily_report_review" in jobs
+    assert "weekly_summary" in jobs
+    assert jobs["weekly_summary"]["schedule_kind"] == "weekly_day_time"

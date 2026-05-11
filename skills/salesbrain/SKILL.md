@@ -24,7 +24,11 @@ Openclaw does the thinking. SalesBrain stores state, runs schedules, and applies
 
 Use this skill whenever SalesBrain wakes you with one of these kinds:
 
+- `initial_analysis`
 - `morning_analysis`
+- `work_followup`
+- `daily_report_review`
+- `weekly_summary`
 - `due_task_scan`
 - `workflow_reflection`
 - `github_update_check`
@@ -66,6 +70,7 @@ salesbrain init --sales-name "<sales name>"
 
 During initialization, ask the user for the EBOSS API key if SalesBrain prompts for it.
 This is the value used in the EBOSS `api-key` HTTP header.
+`salesbrain init` immediately syncs EBOSS, backfills 30 days of daily reports, and runs one full `initial_analysis` wake-up.
 
 After a successful install or update, mark the installed revision:
 
@@ -114,11 +119,24 @@ Return JSON only. No markdown. No code fences. No extra commentary.
 - Do not schedule yourself inside Openclaw for business follow-ups.
 - Do not invent facts that are not present in the payload context.
 - Keep every task concrete, dated, and actionable.
+- When SalesBrain asks you to create or update tasks, do it directly in the JSON response. Do not ask the sales person for confirmation first.
 - If nothing needs action, return `ok: true` and empty arrays.
 - For cron migration, only return business-user-task cron job ids in `cron_jobs_to_remove`.
 - Never remove system health, backup, maintenance, or platform cron jobs.
 
 ## Behavior by Wake Kind
+
+### `initial_analysis`
+
+This runs once after first installation and first EBOSS sync.
+
+Analyze the last 20 days of daily reports plus EBOSS project/opportunity/task data.
+Apply the 5.1 to 5.4 logic:
+
+- find promised next steps and missed follow-ups
+- find vague or weak daily reports
+- find unrealistic project timelines and stage delays
+- create the first follow-up tasks directly
 
 ### `morning_analysis`
 
@@ -130,6 +148,34 @@ Return:
 - task updates for items already in flight
 - review suggestions for the human
 - reusable workflow items worth keeping
+
+Apply these preset logic passes:
+
+- 5.1: review the last 20 days of reports for next-step commitments and missing follow-through
+- 5.2: identify vague reports or hollow progress and create concrete improvement tasks
+- 5.3: check stage timing against rough assumptions: 需求沟通 2-3 个月, 立项约 3 个月, 采购约 1 个月, 合同流程约 1 个月
+- 5.4: when weekly context is present, turn the weekly summary into next-week tasks
+
+### `work_followup`
+
+This runs at least three times per day, normally 08:30, 13:30, and 19:30.
+
+Push the sales person forward with concrete, timely actions.
+Create or update SalesBrain tasks directly when a follow-up is needed.
+Keep task titles short and executable.
+
+### `daily_report_review`
+
+This runs at 22:00.
+
+Review the most recent daily report for quality, completeness, next actions, real progress, and vagueness.
+Create missing follow-up tasks directly.
+Return review suggestions when the daily report needs improvement.
+
+### `weekly_summary`
+
+Summarize the current week, plan next week, and create next-week follow-up tasks directly.
+Return reusable methods as `workflow_items` when the week reveals a good habit, checklist, or project-push pattern.
 
 ### `due_task_scan`
 
@@ -153,6 +199,9 @@ Return:
 - workflow items worth learning
 - business cron jobs that should move to SalesBrain
 - any tasks that should be preserved or updated before the cron is removed
+
+Do not create normal sales reminder tasks in this wake.
+Keep working methods, product/function directions, and front-end/back-end coordination ideas local in `workflow_items`.
 
 ### `github_update_check`
 

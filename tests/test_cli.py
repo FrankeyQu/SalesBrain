@@ -22,6 +22,10 @@ def test_cli_init_and_status(tmp_path, monkeypatch, capsys):
     config_path = tmp_path / "config.toml"
     monkeypatch.setattr("salesbrain.cli.sys.stdin", SimpleNamespace(isatty=lambda: True))
     monkeypatch.setattr("salesbrain.cli.getpass.getpass", lambda prompt: "secret-key")
+    monkeypatch.setattr(
+        "salesbrain.cli.SalesBrainService.first_run",
+        lambda self, *args, **kwargs: {"ok": True, "sync_result": {"ok": True}, "analysis_result": {"ok": True}},
+    )
     monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
 
     assert main(["init", "--config", str(config_path), "--sales-name", "Alice"]) == 0
@@ -37,6 +41,10 @@ def test_cli_init_prompts_for_eboss_key(tmp_path, monkeypatch, capsys):
     config_path = tmp_path / "config.toml"
     monkeypatch.setattr("salesbrain.cli.sys.stdin", SimpleNamespace(isatty=lambda: True))
     monkeypatch.setattr("salesbrain.cli.getpass.getpass", lambda prompt: "prompted-key")
+    monkeypatch.setattr(
+        "salesbrain.cli.SalesBrainService.first_run",
+        lambda self, *args, **kwargs: {"ok": True, "sync_result": {"ok": True}, "analysis_result": {"ok": True}},
+    )
     monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
 
     assert main(["init", "--config", str(config_path), "--sales-name", "Alice"]) == 0

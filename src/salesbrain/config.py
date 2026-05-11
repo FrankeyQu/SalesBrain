@@ -26,6 +26,19 @@ def _parse_int(value: Any, default: int) -> int:
         return default
 
 
+def _parse_time_list(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None or value == "":
+        return default
+    if isinstance(value, str):
+        items = [item.strip() for item in value.split(",")]
+    elif isinstance(value, (list, tuple)):
+        items = [str(item).strip() for item in value]
+    else:
+        return default
+    parsed = tuple(item for item in items if item)
+    return parsed or default
+
+
 @dataclass(slots=True)
 class SalesBrainConfig:
     home: Path
@@ -48,8 +61,11 @@ class SalesBrainConfig:
     wake_timeout_seconds: int = 120
     daily_sync_time: str = "02:00"
     morning_analysis_time: str = "06:00"
+    work_followup_times: tuple[str, ...] = ("08:30", "13:30", "19:30")
+    daily_report_review_time: str = "22:00"
     due_task_scan_minutes: int = 5
     workflow_reflection_time: str = "23:30"
+    weekly_summary_time: str = "fri 17:30"
     github_update_check_time: str = "09:00"
     github_repo: str = "FrankeyQu/SalesBrain"
     github_branch: str = "main"
@@ -83,8 +99,11 @@ class SalesBrainConfig:
             wake_timeout_seconds=self.wake_timeout_seconds,
             daily_sync_time=self.daily_sync_time,
             morning_analysis_time=self.morning_analysis_time,
+            work_followup_times=tuple(self.work_followup_times),
+            daily_report_review_time=self.daily_report_review_time,
             due_task_scan_minutes=self.due_task_scan_minutes,
             workflow_reflection_time=self.workflow_reflection_time,
+            weekly_summary_time=self.weekly_summary_time,
             github_update_check_time=self.github_update_check_time,
             github_repo=self.github_repo,
             github_branch=self.github_branch,
@@ -175,8 +194,18 @@ def load_config(config_path: str | Path | None = None) -> SalesBrainConfig:
         wake_timeout_seconds=_parse_int(_env("OPENCLAW_WAKE_TIMEOUT_SECONDS") or openclaw.get("wake_timeout_seconds"), 120),
         daily_sync_time=str(schedule.get("eboss_daily_sync", "02:00")).strip() or "02:00",
         morning_analysis_time=str(schedule.get("morning_work_analysis", "06:00")).strip() or "06:00",
+        work_followup_times=_parse_time_list(
+            _env("SALESBRAIN_WORK_FOLLOWUP_TIMES") or schedule.get("work_followup_times"),
+            ("08:30", "13:30", "19:30"),
+        ),
+        daily_report_review_time=_env("SALESBRAIN_DAILY_REPORT_REVIEW_TIME")
+        or str(schedule.get("daily_report_review", "22:00")).strip()
+        or "22:00",
         due_task_scan_minutes=_parse_int(_env("SALESBRAIN_DUE_TASK_SCAN_MINUTES") or schedule.get("due_task_scan_minutes"), 5),
         workflow_reflection_time=str(schedule.get("workflow_reflection", "23:30")).strip() or "23:30",
+        weekly_summary_time=_env("SALESBRAIN_WEEKLY_SUMMARY_TIME")
+        or str(schedule.get("weekly_summary", "fri 17:30")).strip()
+        or "fri 17:30",
         github_update_check_time=_env("SALESBRAIN_GITHUB_UPDATE_CHECK_TIME") or str(github.get("update_check_time", "09:00")).strip() or "09:00",
         github_repo=_env("SALESBRAIN_GITHUB_REPO") or str(github.get("repo", "FrankeyQu/SalesBrain")).strip() or "FrankeyQu/SalesBrain",
         github_branch=_env("SALESBRAIN_GITHUB_BRANCH") or str(github.get("branch", "main")).strip() or "main",
@@ -218,8 +247,11 @@ wake_timeout_seconds = 120
 [schedule]
 eboss_daily_sync = "02:00"
 morning_work_analysis = "06:00"
+work_followup_times = ["08:30", "13:30", "19:30"]
+daily_report_review = "22:00"
 due_task_scan_minutes = 5
 workflow_reflection = "23:30"
+weekly_summary = "fri 17:30"
 scheduler_tick_seconds = 30
 
 [github]

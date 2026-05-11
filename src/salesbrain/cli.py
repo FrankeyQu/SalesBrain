@@ -85,7 +85,7 @@ def cmd_init(args: argparse.Namespace) -> dict[str, Any]:
         secret_file = config_path.parent / "secrets" / "eboss-api-key.txt"
         secret_file.parent.mkdir(parents=True, exist_ok=True)
         secret_file.write_text(eboss_api_key, encoding="utf-8")
-    result = _run_with_service(str(config_path), lambda service: service.bootstrap(), bootstrap=False)
+    result = _run_with_service(str(config_path), lambda service: service.first_run(), bootstrap=False)
     result["config_path"] = str(config_path.resolve())
     return result
 
@@ -130,8 +130,16 @@ def cmd_daemon(args: argparse.Namespace) -> dict[str, Any]:
 
 def cmd_wake(args: argparse.Namespace) -> dict[str, Any]:
     def _run(service: SalesBrainService) -> dict[str, Any]:
+        if args.kind == "initial":
+            return service.initial_analysis()
         if args.kind == "morning":
             return service.morning_analysis()
+        if args.kind == "followup":
+            return service.work_followup()
+        if args.kind == "review":
+            return service.daily_report_review()
+        if args.kind == "weekly":
+            return service.weekly_summary()
         if args.kind == "due":
             return service.scan_due_tasks()
         if args.kind == "workflow":
@@ -241,7 +249,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     wake = sub.add_parser("wake", parents=[common], help="Wake Openclaw for a specific review pass")
     wake_sub = wake.add_subparsers(dest="kind", required=True)
-    for kind in ("morning", "due", "workflow"):
+    for kind in ("initial", "morning", "followup", "review", "weekly", "due", "workflow"):
         wake_sub.add_parser(kind, parents=[common], help=f"Run {kind} wake-up").set_defaults(func=cmd_wake, kind=kind)
 
     eboss = sub.add_parser("eboss", parents=[common], help="EBOSS operations")

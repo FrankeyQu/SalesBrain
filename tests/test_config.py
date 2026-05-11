@@ -27,3 +27,6 @@ def test_write_and_load_config_uses_local_paths(tmp_path, monkeypatch):
     assert cfg.github_repo == "FrankeyQu/SalesBrain"
     assert cfg.github_branch == "main"
     assert cfg.github_update_check_time == "09:00"
+    assert cfg.work_followup_times == ("08:30", "13:30", "19:30")
+    assert cfg.daily_report_review_time == "22:00"
+    assert cfg.weekly_summary_time == "fri 17:30"

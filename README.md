@@ -6,13 +6,15 @@ What it does:
 
 - syncs EBOSS data into SQLite
 - backfills the last 30 days of EBOSS daily reports on first successful sync
+- runs a first-use EBOSS sync and full Openclaw analysis during `salesbrain init`
 - tracks follow-up tasks, review suggestions, and workflow patterns
-- wakes Openclaw on a fixed schedule
+- wakes Openclaw on a fixed schedule: 02:00 sync, 06:00 analysis, 08:30/13:30/19:30 follow-up, 22:00 report review, 23:30 workflow reflection, and weekly summary
 - applies Openclaw's structured decisions
 - can inspect Openclaw cron jobs and migrate business tasks into SalesBrain
 - checks GitHub daily and wakes Openclaw to ask before updating SalesBrain
 
 SalesBrain is intentionally not an AI model. Openclaw does the thinking.
+Openclaw decides which tasks to create and SalesBrain applies those structured decisions directly.
 
 The repo does not hardcode any specific Openclaw install path. The bridge command is configurable.
 
@@ -25,6 +27,7 @@ salesbrain daemon
 ```
 
 `salesbrain init` prompts for the EBOSS `api-key` value if it is not supplied by `--eboss-api-key` or `EBOSS_API_KEY`.
+After writing the config it immediately syncs EBOSS, backfills 30 days of daily reports, and wakes Openclaw once for a full baseline analysis.
 
 Or create a local config from the included template:
 
@@ -39,7 +42,11 @@ Then edit the Openclaw bridge commands in `config.toml`.
 ```bash
 salesbrain status
 salesbrain eboss sync
+salesbrain wake initial
 salesbrain wake morning
+salesbrain wake followup
+salesbrain wake review
+salesbrain wake weekly
 salesbrain wake due
 salesbrain wake workflow
 salesbrain github check

@@ -16,6 +16,17 @@ The command should:
 2. Wake the local Openclaw mentor runtime
 3. Return JSON on stdout
 
+Common wake kinds:
+
+- `initial_analysis`: first-use full analysis after EBOSS sync
+- `morning_analysis`: 06:00 work-state analysis and task generation
+- `work_followup`: 08:30, 13:30, and 19:30 sales follow-up push
+- `daily_report_review`: 22:00 review of the latest daily report
+- `weekly_summary`: weekly summary and next-week task planning
+- `due_task_scan`: due task review
+- `workflow_reflection`: local method extraction and cron migration
+- `github_update_check`: ask whether to update SalesBrain
+
 Recommended response shape:
 
 ```json
@@ -32,6 +43,8 @@ Recommended response shape:
 ```
 
 For `github_update_check`, the `summary` should be a direct question asking the user whether to update SalesBrain. The bridge must not update code without user confirmation.
+For normal sales analysis wakes, Openclaw should create or update tasks directly in JSON and should not ask the sales person for confirmation first.
+For `workflow_reflection`, avoid normal sales reminders and return local learnings as `workflow_items`.
 
 ## Cron listing command
 

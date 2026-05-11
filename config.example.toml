@@ -20,8 +20,11 @@ wake_timeout_seconds = 120
 [schedule]
 eboss_daily_sync = "02:00"
 morning_work_analysis = "06:00"
+work_followup_times = ["08:30", "13:30", "19:30"]
+daily_report_review = "22:00"
 due_task_scan_minutes = 5
 workflow_reflection = "23:30"
+weekly_summary = "fri 17:30"
 scheduler_tick_seconds = 30
 
 [github]

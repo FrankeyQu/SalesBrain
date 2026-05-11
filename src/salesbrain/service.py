@@ -10,9 +10,13 @@ from .eboss import EbossClient
 from .github import compare_commit_ids, fetch_remote_commit
 from .openclaw import OpenClawAdapter
 from .prompts import (
+    build_daily_report_review_prompt,
     build_github_update_prompt,
+    build_initial_analysis_prompt,
     build_due_task_prompt,
     build_morning_analysis_prompt,
+    build_weekly_summary_prompt,
+    build_work_followup_prompt,
     build_workflow_reflection_prompt,
 )
 from .timeutil import iso_now, now_in_zone, parse_iso_datetime
@@ -25,6 +29,7 @@ GITHUB_LAST_CHECKED_REVISION_KEY = "github_last_checked_revision"
 GITHUB_LAST_CHECKED_AT_KEY = "github_last_checked_at"
 GITHUB_LAST_PROMPTED_REVISION_KEY = "github_last_prompted_revision"
 GITHUB_BACKFILL_DONE_KEY = "eboss_daily_report_backfill_done"
+FIRST_RUN_DONE_KEY = "salesbrain_first_run_done"
 
 
 def _loads(value: Any, default: Any) -> Any:
@@ -117,6 +122,79 @@ class SalesBrainService:
             return now.isoformat(timespec="seconds")
         return iso_now(self.config.timezone)
 
+    def _recent_records_by_type(self, object_type: str, limit: int = 20) -> list[dict[str, Any]]:
+        return _compact_records(self.store.latest_raw_records_by_type(object_type, limit), limit)
+
+    def _analysis_context(self, *, now: datetime | None = None, daily_report_limit: int = 20) -> dict[str, Any]:
+        now = now or now_in_zone(self.config.timezone)
+        latest_sync = self.store.latest_sync_run()
+        if latest_sync:
+            latest_sync = _decode_json_columns(latest_sync)
+        recent_daily_reports = self._recent_records_by_type("daily_report", daily_report_limit)
+        latest_daily_report = recent_daily_reports[0] if recent_daily_reports else None
+        analysis_rules = {
+            "follow_up_rules": [
+                "scan the last 20 days of daily reports for explicit next steps",
+                "find items that were promised previously but never followed through",
+                "turn each concrete next step into a task with a date and reminder",
+            ],
+            "vague_report_rules": [
+                "flag reports with only vague adjectives, no numbers, and no next action",
+                "create a task that forces the report to become specific on the next day",
+            ],
+            "timeline_rules": [
+                "watch for projects stuck too long in需求沟通, 立项, 采购, or 合同流程",
+                "use rough planning assumptions: 需求沟通 2-3 个月, 立项约 3 个月, 采购约 1 个月, 合同流程约 1 个月",
+                "if the timeline is unrealistic, create a follow-up task to push the bottleneck forward",
+            ],
+            "weekly_rules": [
+                "summarize the week and create next-week tasks directly",
+                "capture repeatable workflow patterns locally",
+            ],
+            "product_rules": [
+                "extract any new product, feature, or direction mentioned in the reports",
+                "capture front-end and back-end coordination ideas as reusable workflow items",
+            ],
+        }
+        return {
+            "now": self.now_iso(now),
+            "profile": self.store.get_profile(),
+            "latest_sync": latest_sync,
+            "latest_daily_report": latest_daily_report,
+            "recent_daily_reports": recent_daily_reports,
+            "recent_projects": self._recent_records_by_type("project", 20),
+            "recent_opportunities": self._recent_records_by_type("opportunity", 20),
+            "recent_customers": self._recent_records_by_type("customer", 20),
+            "recent_leads": self._recent_records_by_type("lead", 20),
+            "recent_tasks": self._recent_records_by_type("eboss_task", 20),
+            "recent_follow_records": self._recent_records_by_type("follow_record", 20),
+            "pending_tasks": self.list_tasks(status="pending", limit=50),
+            "due_tasks": self.list_due_tasks(now=now, limit=20),
+            "open_review_suggestions": self.list_review_suggestions(status="open", limit=20),
+            "workflow_items": self.list_workflow_items(limit=20),
+            "analysis_rules": analysis_rules,
+        }
+
+    def _weekly_analysis_context(self, *, now: datetime | None = None) -> dict[str, Any]:
+        now = now or now_in_zone(self.config.timezone)
+        week_start = now - timedelta(days=now.weekday())
+        next_week_start = week_start + timedelta(days=7)
+        context = self._analysis_context(now=now, daily_report_limit=7)
+        context.update(
+            {
+                "week_start": week_start.date().isoformat(),
+                "week_end": now.date().isoformat(),
+                "next_week_start": next_week_start.date().isoformat(),
+                "next_week_end": (next_week_start + timedelta(days=6)).date().isoformat(),
+                "weekly_focus": [
+                    "summarize the current week",
+                    "arrange next week's follow-up checklist",
+                    "turn reusable methods into local workflow_items",
+                ],
+            }
+        )
+        return context
+
     def bootstrap(self) -> dict[str, Any]:
         self.config.ensure_dirs()
         self.store.init_schema()
@@ -139,6 +217,34 @@ class SalesBrainService:
             "scheduler_jobs": self.store.list_scheduler_jobs(),
             "github_state": github_state,
         }
+
+    def first_run(self, *, now: datetime | None = None) -> dict[str, Any]:
+        self.bootstrap()
+        now = now or now_in_zone(self.config.timezone)
+        now_iso = self.now_iso(now)
+        if self.store.get_state(FIRST_RUN_DONE_KEY) == "1":
+            return {
+                "ok": True,
+                "skipped": True,
+                "reason": "first_run_already_completed",
+            }
+        sync_result = self.sync_eboss(now=now)
+        analysis_result = self.initial_analysis(now=now)
+        ok = bool(sync_result.get("ok")) and bool(analysis_result.get("ok", True))
+        if ok:
+            self.store.set_state(FIRST_RUN_DONE_KEY, "1", now_iso=now_iso)
+        return {
+            "ok": ok,
+            "sync_result": sync_result,
+            "analysis_result": analysis_result,
+            "first_run_done": ok,
+        }
+
+    def initial_analysis(self, *, now: datetime | None = None) -> dict[str, Any]:
+        context = self._analysis_context(now=now, daily_report_limit=20)
+        context["run_mode"] = "first_run"
+        prompt = build_initial_analysis_prompt(context)
+        return self._wake_openclaw(kind="initial_analysis", prompt=prompt, context=context, now=now)
 
     def _eboss(self) -> EbossClient:
         if self._eboss_client is None:
@@ -244,10 +350,8 @@ class SalesBrainService:
             )
             counts[object_type] = counts.get(object_type, 0) + count
 
-        def insert_daily_report(query_date: str, payload: dict[str, Any]) -> None:
-            if self.store.raw_record_exists(object_type="daily_report", object_id=query_date):
-                return
-            self.store.insert_raw_record(
+        def upsert_daily_report(query_date: str, payload: dict[str, Any]) -> None:
+            inserted = self.store.upsert_raw_record_by_object(
                 sync_run_id=run_id,
                 api_id="get-daily-report-self",
                 object_type="daily_report",
@@ -256,7 +360,8 @@ class SalesBrainService:
                 payload=payload,
                 fetched_at=self.now_iso(now),
             )
-            counts["daily_report"] = counts.get("daily_report", 0) + 1
+            if inserted:
+                counts["daily_report"] = counts.get("daily_report", 0) + 1
 
         try:
             user_resp = client.call(
@@ -302,6 +407,7 @@ class SalesBrainService:
 
         start_date = (now - timedelta(days=30)).strftime("%Y-%m-%d 00:00:00")
         end_date = now.strftime("%Y-%m-%d 23:59:59")
+        today_query_date = now.date().isoformat()
         page_size = str(self.config.eboss_page_size)
         sync_plan = [
             (
@@ -398,6 +504,18 @@ class SalesBrainService:
             except Exception as exc:
                 errors.append({"api_id": api_id, "error": str(exc)})
 
+        try:
+            response = client.call("get-daily-report-self", {"queryDate": today_query_date})
+            records = response.records
+            if not records:
+                records = [dict(response.raw)]
+            for record in records:
+                payload = dict(record)
+                payload["salesbrain_query_date"] = today_query_date
+                upsert_daily_report(today_query_date, payload)
+        except Exception as exc:
+            errors.append({"api_id": "get-daily-report-self", "queryDate": today_query_date, "error": str(exc)})
+
         if self.store.get_state(GITHUB_BACKFILL_DONE_KEY) != "1":
             backfill_errors = 0
             backfill_success = 0
@@ -411,7 +529,7 @@ class SalesBrainService:
                     for record in records:
                         payload = dict(record)
                         payload["salesbrain_query_date"] = query_date
-                        insert_daily_report(query_date, payload)
+                        upsert_daily_report(query_date, payload)
                     backfill_success += 1
                 except Exception as exc:
                     backfill_errors += 1
@@ -788,13 +906,29 @@ class SalesBrainService:
             return {"ok": False, "wake_run": _decode_json_columns(finished or wake), "error": str(exc)}
 
     def morning_analysis(self, *, now: datetime | None = None) -> dict[str, Any]:
-        context = {
-            "profile": self.store.get_profile(),
-            "snapshot": self.get_eboss_snapshot(limit=50),
-            "pending_tasks": self.list_tasks(status="pending", limit=50),
-        }
+        context = self._analysis_context(now=now, daily_report_limit=20)
+        context["run_mode"] = "morning_analysis"
         prompt = build_morning_analysis_prompt(context)
         return self._wake_openclaw(kind="morning_analysis", prompt=prompt, context=context, now=now)
+
+    def work_followup(self, *, now: datetime | None = None) -> dict[str, Any]:
+        context = self._analysis_context(now=now, daily_report_limit=20)
+        context["run_mode"] = "work_followup"
+        context["target_times"] = list(self.config.work_followup_times)
+        prompt = build_work_followup_prompt(context)
+        return self._wake_openclaw(kind="work_followup", prompt=prompt, context=context, now=now)
+
+    def daily_report_review(self, *, now: datetime | None = None) -> dict[str, Any]:
+        context = self._analysis_context(now=now, daily_report_limit=20)
+        context["run_mode"] = "daily_report_review"
+        prompt = build_daily_report_review_prompt(context)
+        return self._wake_openclaw(kind="daily_report_review", prompt=prompt, context=context, now=now)
+
+    def weekly_summary(self, *, now: datetime | None = None) -> dict[str, Any]:
+        context = self._weekly_analysis_context(now=now)
+        context["run_mode"] = "weekly_summary"
+        prompt = build_weekly_summary_prompt(context)
+        return self._wake_openclaw(kind="weekly_summary", prompt=prompt, context=context, now=now)
 
     def scan_due_tasks(self, *, now: datetime | None = None) -> dict[str, Any]:
         due_tasks = self.list_due_tasks(now=now, limit=20)
@@ -820,16 +954,17 @@ class SalesBrainService:
 
     def workflow_reflection(self, *, now: datetime | None = None) -> dict[str, Any]:
         cron_jobs = self.openclaw.list_cron_jobs()
-        context = {
-            "profile": self.store.get_profile(),
-            "pending_tasks": self.list_tasks(status="pending", limit=100),
-            "snapshot": self.get_eboss_snapshot(limit=50),
-            "openclaw_cron_jobs": cron_jobs,
-            "business_cron_candidates": self.openclaw.filter_business_cron_jobs(cron_jobs),
-            "existing_workflow_items": [
-                _decode_json_columns(item)
-                for item in self.store.list_workflow_items(limit=50)
-            ],
-        }
+        context = self._analysis_context(now=now, daily_report_limit=20)
+        context.update(
+            {
+                "run_mode": "workflow_reflection",
+                "openclaw_cron_jobs": cron_jobs,
+                "business_cron_candidates": self.openclaw.filter_business_cron_jobs(cron_jobs),
+                "existing_workflow_items": [
+                    _decode_json_columns(item)
+                    for item in self.store.list_workflow_items(limit=50)
+                ],
+            }
+        )
         prompt = build_workflow_reflection_prompt(context)
         return self._wake_openclaw(kind="workflow_reflection", prompt=prompt, context=context, now=now)

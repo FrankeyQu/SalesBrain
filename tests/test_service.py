@@ -134,6 +134,23 @@ def test_first_eboss_sync_backfills_30_daily_reports(tmp_path, monkeypatch):
     service.close()
 
 
+def test_first_run_syncs_then_runs_initial_analysis(tmp_path, monkeypatch):
+    monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
+    config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")
+    cfg = load_config(config_path)
+    service = SalesBrainService(cfg, eboss_client=FakeEbossClient(), openclaw_adapter=DummyOpenClaw())
+
+    result = service.first_run(now=datetime(2026, 5, 11, 2, 0, tzinfo=ZoneInfo("Asia/Shanghai")))
+
+    assert result["ok"] is True
+    assert result["first_run_done"] is True
+    assert service.store.count_raw_records("daily_report") == 30
+    assert service.store.get_state("salesbrain_first_run_done") == "1"
+    assert any(run["wake_type"] == "initial_analysis" for run in service.list_wake_runs(limit=10))
+    assert service.list_tasks(status="pending", limit=10)[0]["title"] == "Follow up with customer"
+    service.close()
+
+
 def test_github_update_check_wakes_openclaw_when_remote_is_newer(tmp_path, monkeypatch):
     monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit("new-sha"))
     config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")

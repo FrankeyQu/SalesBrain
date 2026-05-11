@@ -295,6 +295,63 @@ class SalesBrainStore:
                 ),
             )
 
+    def upsert_raw_record_by_object(
+        self,
+        *,
+        sync_run_id: int,
+        api_id: str,
+        object_type: str,
+        object_id: str,
+        object_name: str | None,
+        payload: dict[str, Any],
+        fetched_at: str,
+    ) -> bool:
+        with self.transaction():
+            row = self.conn.execute(
+                """
+                SELECT id
+                FROM eboss_raw_records
+                WHERE object_type = ? AND object_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (object_type, object_id),
+            ).fetchone()
+            if row is None:
+                self.conn.execute(
+                    """
+                    INSERT INTO eboss_raw_records
+                      (sync_run_id, api_id, object_type, object_id, object_name, payload_json, fetched_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sync_run_id,
+                        api_id,
+                        object_type,
+                        object_id,
+                        object_name,
+                        json.dumps(payload, ensure_ascii=False),
+                        fetched_at,
+                    ),
+                )
+                return True
+            self.conn.execute(
+                """
+                UPDATE eboss_raw_records
+                SET sync_run_id = ?, api_id = ?, object_name = ?, payload_json = ?, fetched_at = ?
+                WHERE id = ?
+                """,
+                (
+                    sync_run_id,
+                    api_id,
+                    object_name,
+                    json.dumps(payload, ensure_ascii=False),
+                    fetched_at,
+                    row["id"],
+                ),
+            )
+            return False
+
     def insert_raw_records(
         self,
         *,
@@ -351,6 +408,22 @@ class SalesBrainStore:
         rows = self.conn.execute(
             "SELECT * FROM eboss_raw_records ORDER BY id DESC LIMIT ?",
             (limit,),
+        ).fetchall()
+        return rows_to_dicts(rows)
+
+    def latest_raw_records_by_type(self, object_type: str, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM eboss_raw_records
+            WHERE object_type = ?
+            ORDER BY
+              CASE WHEN object_id IS NULL THEN 1 ELSE 0 END,
+              object_id DESC,
+              id DESC
+            LIMIT ?
+            """,
+            (object_type, limit),
         ).fetchall()
         return rows_to_dicts(rows)
 
