@@ -113,6 +113,7 @@ EBOSS_APIS: dict[str, dict[str, Any]] = {
             "taskUserIds": {"required": False},
         },
     },
+    # V1 does not call this endpoint directly because /listFollow requires followObj/followObjId.
     "get-follow-byuser": {
         "method": "GET",
         "path": "/sale-mgt/salesfollow/listFollow",
@@ -350,4 +351,3 @@ class EbossClient:
             if len(page_records) < size:
                 break
         return records
-

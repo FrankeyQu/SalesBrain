@@ -446,8 +446,6 @@ class SalesBrainService:
                 "counts": counts,
             }
 
-        start_date = (now - timedelta(days=30)).strftime("%Y-%m-%d 00:00:00")
-        end_date = now.strftime("%Y-%m-%d 23:59:59")
         today_query_date = now.date().isoformat()
         page_size = str(self.config.eboss_page_size)
         sync_plan = [
@@ -512,18 +510,6 @@ class SalesBrainService:
                     "statusTypes": "2,1,7,8,9",
                     "statuss": "5,1",
                     "taskUserIds": user_id,
-                },
-                True,
-            ),
-            (
-                "get-follow-byuser",
-                "follow_record",
-                {
-                    "userId": user_id,
-                    "current": "1",
-                    "size": page_size,
-                    "startDate": start_date,
-                    "endDate": end_date,
                 },
                 True,
             ),
