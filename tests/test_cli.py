@@ -86,3 +86,13 @@ def test_cli_returns_nonzero_when_handler_reports_not_ok(tmp_path, monkeypatch, 
     assert main(["--config", str(config_path), "eboss", "sync"]) == 1
     output = capsys.readouterr().out
     assert '"ok": false' in output
+
+
+def test_cli_team_status(tmp_path, monkeypatch, capsys):
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
+
+    assert main(["--config", str(config_path), "team", "status"]) == 0
+    output = capsys.readouterr().out
+    assert "team_name" in output
+    assert "node_id" in output

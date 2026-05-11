@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -96,6 +97,42 @@ CREATE TABLE IF NOT EXISTS workflow_sync_items (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS team_members (
+  member_id TEXT PRIMARY KEY,
+  team_name TEXT NOT NULL,
+  node_id TEXT NOT NULL,
+  real_name TEXT NOT NULL,
+  endpoint TEXT,
+  role TEXT NOT NULL DEFAULT 'sales',
+  status TEXT NOT NULL CHECK (status IN ('online', 'offline', 'unknown')),
+  version INTEGER NOT NULL DEFAULT 1,
+  last_seen_at TEXT,
+  updated_at TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_team_members_team_node
+  ON team_members(team_name, node_id);
+CREATE INDEX IF NOT EXISTS idx_team_members_status
+  ON team_members(team_name, status);
+
+CREATE TABLE IF NOT EXISTS team_sync_events (
+  event_id TEXT PRIMARY KEY,
+  event_type TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  team_name TEXT NOT NULL,
+  origin_node_id TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_team_sync_events_team_created
+  ON team_sync_events(team_name, created_at);
+CREATE INDEX IF NOT EXISTS idx_team_sync_events_entity
+  ON team_sync_events(entity_type, entity_id);
+
 CREATE TABLE IF NOT EXISTS wake_runs (
   id TEXT PRIMARY KEY,
   wake_type TEXT NOT NULL,
@@ -161,18 +198,20 @@ class SalesBrainStore:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self._lock = threading.RLock()
 
     def close(self) -> None:
         self.conn.close()
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        try:
-            yield self.conn
-            self.conn.commit()
-        except Exception:
-            self.conn.rollback()
-            raise
+        with self._lock:
+            try:
+                yield self.conn
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
 
     def init_schema(self) -> None:
         with self.transaction():
@@ -648,6 +687,40 @@ class SalesBrainStore:
             )
         return self.get_workflow_item(item_id) or row
 
+    def upsert_workflow_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        item_id = str(item["id"])
+        row = {
+            "id": item_id,
+            "title": str(item["title"]).strip(),
+            "pattern_type": str(item["pattern_type"]).strip(),
+            "summary": str(item["summary"]).strip(),
+            "example_json": json.dumps(item.get("example_json") or {}, ensure_ascii=False),
+            "source_task_ids_json": json.dumps(item.get("source_task_ids_json") or [], ensure_ascii=False),
+            "sync_status": str(item.get("sync_status", "ready")),
+            "created_at": str(item.get("created_at") or item.get("now_iso")),
+            "updated_at": str(item.get("updated_at") or item.get("now_iso")),
+        }
+        with self.transaction():
+            self.conn.execute(
+                """
+                INSERT INTO workflow_sync_items
+                  (id, title, pattern_type, summary, example_json, source_task_ids_json, sync_status, created_at, updated_at)
+                VALUES
+                  (:id, :title, :pattern_type, :summary, :example_json, :source_task_ids_json, :sync_status, :created_at, :updated_at)
+                ON CONFLICT(id) DO UPDATE SET
+                  title = excluded.title,
+                  pattern_type = excluded.pattern_type,
+                  summary = excluded.summary,
+                  example_json = excluded.example_json,
+                  source_task_ids_json = excluded.source_task_ids_json,
+                  sync_status = excluded.sync_status,
+                  updated_at = excluded.updated_at
+                WHERE excluded.updated_at >= workflow_sync_items.updated_at
+                """,
+                row,
+            )
+        return self.get_workflow_item(item_id) or row
+
     def get_workflow_item(self, item_id: str) -> dict[str, Any] | None:
         row = self.conn.execute("SELECT * FROM workflow_sync_items WHERE id = ?", (item_id,)).fetchone()
         return row_to_dict(row)
@@ -656,6 +729,139 @@ class SalesBrainStore:
         rows = self.conn.execute(
             "SELECT * FROM workflow_sync_items ORDER BY created_at DESC LIMIT ?",
             (limit,),
+        ).fetchall()
+        return rows_to_dicts(rows)
+
+    def upsert_team_member(self, member: dict[str, Any]) -> dict[str, Any]:
+        version_raw = member.get("version", 1)
+        version = 1 if version_raw in (None, "") else int(version_raw)
+        row = {
+            "member_id": str(member["member_id"]),
+            "team_name": str(member["team_name"]),
+            "node_id": str(member["node_id"]),
+            "real_name": str(member.get("real_name") or ""),
+            "endpoint": member.get("endpoint"),
+            "role": str(member.get("role") or "sales"),
+            "status": str(member.get("status") or "unknown"),
+            "version": version,
+            "last_seen_at": member.get("last_seen_at"),
+            "updated_at": str(member["updated_at"]),
+            "payload_json": json.dumps(member.get("payload_json") or {}, ensure_ascii=False),
+        }
+        with self.transaction():
+            existing_row = self.conn.execute(
+                """
+                SELECT *
+                FROM team_members
+                WHERE member_id = ?
+                   OR (team_name = ? AND node_id = ?)
+                ORDER BY CASE WHEN member_id = ? THEN 0 ELSE 1 END
+                LIMIT 1
+                """,
+                (row["member_id"], row["team_name"], row["node_id"], row["member_id"]),
+            ).fetchone()
+            existing = row_to_dict(existing_row)
+            if existing:
+                current_version = int(existing.get("version") or 0)
+                current_updated_at = str(existing.get("updated_at") or "")
+                is_stale = row["version"] < current_version and row["updated_at"] < current_updated_at
+                if is_stale:
+                    return existing
+                self.conn.execute(
+                    """
+                    UPDATE team_members
+                    SET member_id = :member_id,
+                        team_name = :team_name,
+                        node_id = :node_id,
+                        real_name = :real_name,
+                        endpoint = :endpoint,
+                        role = :role,
+                        status = :status,
+                        version = :version,
+                        last_seen_at = :last_seen_at,
+                        updated_at = :updated_at,
+                        payload_json = :payload_json
+                    WHERE member_id = :existing_member_id
+                    """,
+                    {**row, "existing_member_id": existing["member_id"]},
+                )
+            else:
+                self.conn.execute(
+                    """
+                    INSERT INTO team_members
+                      (member_id, team_name, node_id, real_name, endpoint, role, status,
+                       version, last_seen_at, updated_at, payload_json)
+                    VALUES
+                      (:member_id, :team_name, :node_id, :real_name, :endpoint, :role, :status,
+                       :version, :last_seen_at, :updated_at, :payload_json)
+                    """,
+                    row,
+                )
+        return self.get_team_member(row["member_id"]) or row
+
+    def get_team_member(self, member_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM team_members WHERE member_id = ?", (member_id,)).fetchone()
+        return row_to_dict(row)
+
+    def list_team_members(self, *, team_name: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if team_name:
+            rows = self.conn.execute(
+                """
+                SELECT *
+                FROM team_members
+                WHERE team_name = ?
+                ORDER BY status ASC, real_name ASC, updated_at DESC
+                LIMIT ?
+                """,
+                (team_name, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM team_members ORDER BY team_name ASC, status ASC, real_name ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return rows_to_dicts(rows)
+
+    def insert_team_sync_event(self, event: dict[str, Any]) -> bool:
+        row = {
+            "event_id": str(event["event_id"]),
+            "event_type": str(event["event_type"]),
+            "entity_type": str(event["entity_type"]),
+            "entity_id": str(event["entity_id"]),
+            "team_name": str(event["team_name"]),
+            "origin_node_id": str(event["origin_node_id"]),
+            "version": int(event.get("version") or 1),
+            "created_at": str(event["created_at"]),
+            "payload_json": json.dumps(event.get("payload_json") or {}, ensure_ascii=False),
+        }
+        with self.transaction():
+            cur = self.conn.execute(
+                """
+                INSERT OR IGNORE INTO team_sync_events
+                  (event_id, event_type, entity_type, entity_id, team_name,
+                   origin_node_id, version, created_at, payload_json)
+                VALUES
+                  (:event_id, :event_type, :entity_type, :entity_id, :team_name,
+                   :origin_node_id, :version, :created_at, :payload_json)
+                """,
+                row,
+            )
+            return cur.rowcount > 0
+
+    def list_team_sync_events(self, *, team_name: str, limit: int = 200) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT *
+            FROM (
+              SELECT *
+              FROM team_sync_events
+              WHERE team_name = ?
+              ORDER BY created_at DESC
+              LIMIT ?
+            )
+            ORDER BY created_at ASC
+            """,
+            (team_name, limit),
         ).fetchall()
         return rows_to_dicts(rows)
 

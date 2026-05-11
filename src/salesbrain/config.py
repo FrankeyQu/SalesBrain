@@ -33,6 +33,19 @@ def _parse_int(value: Any, default: int) -> int:
         return default
 
 
+def _parse_bool(value: Any, default: bool) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _parse_time_list(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
     if value is None or value == "":
         return default
@@ -78,6 +91,18 @@ class SalesBrainConfig:
     github_branch: str = "main"
     github_timeout_seconds: int = 30
     scheduler_tick_seconds: int = 30
+    team_enabled: bool = True
+    team_name: str = "SalesBrain"
+    team_role: str = "sales"
+    team_node_id: str = ""
+    team_advertise_host: str = ""
+    team_http_host: str = "0.0.0.0"
+    team_http_port: int = 37611
+    team_broadcast_host: str = "255.255.255.255"
+    team_broadcast_port: int = 37610
+    team_broadcast_interval_seconds: int = 30
+    team_sync_interval_seconds: int = 60
+    team_secret: str = ""
 
     def ensure_dirs(self) -> None:
         self.home.mkdir(parents=True, exist_ok=True)
@@ -116,6 +141,18 @@ class SalesBrainConfig:
             github_branch=self.github_branch,
             github_timeout_seconds=self.github_timeout_seconds,
             scheduler_tick_seconds=self.scheduler_tick_seconds,
+            team_enabled=self.team_enabled,
+            team_name=self.team_name,
+            team_role=self.team_role,
+            team_node_id=self.team_node_id,
+            team_advertise_host=self.team_advertise_host,
+            team_http_host=self.team_http_host,
+            team_http_port=self.team_http_port,
+            team_broadcast_host=self.team_broadcast_host,
+            team_broadcast_port=self.team_broadcast_port,
+            team_broadcast_interval_seconds=self.team_broadcast_interval_seconds,
+            team_sync_interval_seconds=self.team_sync_interval_seconds,
+            team_secret=self.team_secret,
         )
 
 
@@ -169,6 +206,7 @@ def load_config(config_path: str | Path | None = None) -> SalesBrainConfig:
     schedule = data.get("schedule", {})
     github = data.get("github", {})
     runtime = data.get("runtime", {})
+    team = data.get("team", {})
 
     home_env = _env("SALESBRAIN_HOME")
     home = _expand(home_env) if home_env else _expand_from(runtime.get("home") or config_path.parent, config_dir)
@@ -240,6 +278,18 @@ def load_config(config_path: str | Path | None = None) -> SalesBrainConfig:
         github_branch=_env("SALESBRAIN_GITHUB_BRANCH") or str(github.get("branch", "main")).strip() or "main",
         github_timeout_seconds=_parse_int(_env("SALESBRAIN_GITHUB_TIMEOUT_SECONDS") or github.get("timeout_seconds"), 30),
         scheduler_tick_seconds=_parse_int(_env("SALESBRAIN_SCHEDULER_TICK_SECONDS") or schedule.get("scheduler_tick_seconds"), 30),
+        team_enabled=_parse_bool(_env("SALESBRAIN_TEAM_ENABLED") or team.get("enabled"), True),
+        team_name=_env("SALESBRAIN_TEAM_NAME") or str(team.get("name", "SalesBrain")).strip() or "SalesBrain",
+        team_role=_env("SALESBRAIN_TEAM_ROLE") or str(team.get("role", "sales")).strip() or "sales",
+        team_node_id=_env("SALESBRAIN_TEAM_NODE_ID") or str(team.get("node_id", "")).strip(),
+        team_advertise_host=_env("SALESBRAIN_TEAM_ADVERTISE_HOST") or str(team.get("advertise_host", "")).strip(),
+        team_http_host=_env("SALESBRAIN_TEAM_HTTP_HOST") or str(team.get("http_host", "0.0.0.0")).strip() or "0.0.0.0",
+        team_http_port=_parse_int(_env("SALESBRAIN_TEAM_HTTP_PORT") or team.get("http_port"), 37611),
+        team_broadcast_host=_env("SALESBRAIN_TEAM_BROADCAST_HOST") or str(team.get("broadcast_host", "255.255.255.255")).strip() or "255.255.255.255",
+        team_broadcast_port=_parse_int(_env("SALESBRAIN_TEAM_BROADCAST_PORT") or team.get("broadcast_port"), 37610),
+        team_broadcast_interval_seconds=_parse_int(_env("SALESBRAIN_TEAM_BROADCAST_INTERVAL_SECONDS") or team.get("broadcast_interval_seconds"), 30),
+        team_sync_interval_seconds=_parse_int(_env("SALESBRAIN_TEAM_SYNC_INTERVAL_SECONDS") or team.get("sync_interval_seconds"), 60),
+        team_secret=_env("SALESBRAIN_TEAM_SECRET") or str(team.get("secret", "")).strip(),
     )
     return cfg.with_resolved_paths()
 
@@ -288,6 +338,20 @@ repo = "FrankeyQu/SalesBrain"
 branch = "main"
 update_check_time = "09:00"
 timeout_seconds = 30
+
+[team]
+enabled = true
+name = "SalesBrain"
+role = "sales"
+node_id = ""
+advertise_host = ""
+http_host = "0.0.0.0"
+http_port = 37611
+broadcast_host = "255.255.255.255"
+broadcast_port = 37610
+broadcast_interval_seconds = 30
+sync_interval_seconds = 60
+secret = ""
 
 [runtime]
 home = {str(home)!r}

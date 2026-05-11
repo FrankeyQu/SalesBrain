@@ -30,6 +30,10 @@ def test_write_and_load_config_uses_local_paths(tmp_path, monkeypatch):
     assert cfg.work_followup_times == ("08:30", "13:30", "19:30")
     assert cfg.daily_report_review_time == "22:00"
     assert cfg.weekly_summary_time == "fri 17:30"
+    assert cfg.team_enabled is True
+    assert cfg.team_name == "SalesBrain"
+    assert cfg.team_http_port == 37611
+    assert cfg.team_broadcast_port == 37610
 
 
 def test_relative_config_paths_resolve_from_config_directory(tmp_path, monkeypatch):
@@ -74,3 +78,37 @@ logs_dir = "./salesbrain/logs"
     assert cfg.openclaw_cron_jobs_path == (tmp_path / "cron" / "jobs.json").resolve()
     assert cfg.eboss_api_key_file == secret_file.resolve()
     assert cfg.eboss_api_key == "relative-secret"
+
+
+def test_team_config_can_be_overridden(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        """
+[profile]
+sales_name = "Alice"
+
+[team]
+enabled = false
+name = "North Team"
+role = "manager"
+node_id = "node-a"
+advertise_host = "10.0.0.8"
+http_port = 39001
+broadcast_port = 39000
+secret = "shared"
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("SALESBRAIN_TEAM_ENABLED", raising=False)
+    monkeypatch.delenv("SALESBRAIN_TEAM_NAME", raising=False)
+
+    cfg = load_config(config_path)
+
+    assert cfg.team_enabled is False
+    assert cfg.team_name == "North Team"
+    assert cfg.team_role == "manager"
+    assert cfg.team_node_id == "node-a"
+    assert cfg.team_advertise_host == "10.0.0.8"
+    assert cfg.team_http_port == 39001
+    assert cfg.team_broadcast_port == 39000
+    assert cfg.team_secret == "shared"

@@ -121,10 +121,22 @@ def cmd_daemon(args: argparse.Namespace) -> dict[str, Any]:
                 "ok": True,
                 "results": [asdict(result) for result in scheduler.run_due_jobs()],
             }
+        team_runtime = None
+        team_thread = None
+        if service.config.team_enabled and not args.no_team:
+            from .team import TeamRuntime
+
+            team_runtime = TeamRuntime(service.team())
+            team_thread = team_runtime.start_background()
         try:
             scheduler.run_forever()
         except KeyboardInterrupt:
             return {"ok": True, "stopped": True}
+        finally:
+            if team_runtime is not None:
+                team_runtime.stop()
+                if team_thread is not None:
+                    team_thread.join(timeout=5)
         return {"ok": True}
 
     return _run_with_service(args.config, _run)
@@ -214,6 +226,26 @@ def cmd_github_mark_installed(args: argparse.Namespace) -> dict[str, Any]:
     return _run_with_service(args.config, _run)
 
 
+def cmd_team_status(args: argparse.Namespace) -> dict[str, Any]:
+    return _run_with_service(args.config, lambda service: service.team_status())
+
+
+def cmd_team_peers(args: argparse.Namespace) -> dict[str, Any]:
+    return _run_with_service(args.config, lambda service: service.team_peers())
+
+
+def cmd_team_announce(args: argparse.Namespace) -> dict[str, Any]:
+    return _run_with_service(args.config, lambda service: service.team_announce())
+
+
+def cmd_team_sync(args: argparse.Namespace) -> dict[str, Any]:
+    return _run_with_service(args.config, lambda service: service.team_sync())
+
+
+def cmd_team_serve(args: argparse.Namespace) -> dict[str, Any]:
+    return _run_with_service(args.config, lambda service: service.team_serve())
+
+
 def cmd_tasks_set_status(status: str) -> Callable[[argparse.Namespace], dict[str, Any]]:
     def _runner(args: argparse.Namespace) -> dict[str, Any]:
         updates: dict[str, Any] = {"status": status}
@@ -254,6 +286,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     daemon = sub.add_parser("daemon", parents=[common], help="Run the scheduler loop")
     daemon.add_argument("--once", action="store_true", help="Run due jobs once and exit")
+    daemon.add_argument("--no-team", action="store_true", help="Do not start LAN team discovery inside the daemon")
     daemon.set_defaults(func=cmd_daemon)
 
     monitor = sub.add_parser("monitor", parents=[common], help="Run a health check and repair due jobs once")
@@ -317,6 +350,14 @@ def build_parser() -> argparse.ArgumentParser:
     github_mark = github_sub.add_parser("mark-installed", parents=[common], help="Mark the currently installed commit as up to date")
     github_mark.add_argument("--sha", default=None, help="Explicit commit SHA to record")
     github_mark.set_defaults(func=cmd_github_mark_installed)
+
+    team = sub.add_parser("team", parents=[common], help="Team discovery and sync operations")
+    team_sub = team.add_subparsers(dest="team_command", required=True)
+    team_sub.add_parser("status", parents=[common], help="Show local team sync status").set_defaults(func=cmd_team_status)
+    team_sub.add_parser("peers", parents=[common], help="List discovered team members").set_defaults(func=cmd_team_peers)
+    team_sub.add_parser("announce", parents=[common], help="Broadcast this node on the LAN").set_defaults(func=cmd_team_announce)
+    team_sub.add_parser("sync", parents=[common], help="Sync team events with known peers").set_defaults(func=cmd_team_sync)
+    team_sub.add_parser("serve", parents=[common], help="Run team HTTP sync server and LAN broadcast loop").set_defaults(func=cmd_team_serve)
 
     return parser
 

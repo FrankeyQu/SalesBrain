@@ -33,6 +33,20 @@ branch = "main"
 update_check_time = "09:00"
 timeout_seconds = 30
 
+[team]
+enabled = true
+name = "SalesBrain"
+role = "sales"
+node_id = ""
+advertise_host = ""
+http_host = "0.0.0.0"
+http_port = 37611
+broadcast_host = "255.255.255.255"
+broadcast_port = 37610
+broadcast_interval_seconds = 30
+sync_interval_seconds = 60
+secret = ""
+
 [runtime]
 home = "./salesbrain"
 db_path = "./salesbrain/salesbrain.sqlite"

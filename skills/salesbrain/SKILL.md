@@ -86,6 +86,15 @@ After a successful install or any later update, mark the installed revision:
 salesbrain github mark-installed
 ```
 
+Then make sure the long-running SalesBrain process is started:
+
+```bash
+salesbrain daemon
+```
+
+`salesbrain daemon` runs both the personal scheduler and the LAN team node by default.
+Do not start a separate `salesbrain team serve` process on the same instance unless `salesbrain daemon --no-team` is being used.
+
 When the user later asks for an update, repeat the same sync-first sequence:
 
 1. `cd ~/.openclaw/SalesBrain`
@@ -99,6 +108,7 @@ Openclaw already knows how to use SalesBrain because this skill contains:
 - the wake kinds
 - the JSON input and output contract
 - the rules for creating tasks, suggestions, workflow items, and cron removals
+- the LAN team-sync boundary
 
 ## Required Inputs
 
@@ -139,12 +149,43 @@ Return JSON only. No markdown. No code fences. No extra commentary.
 
 - Do not write to EBOSS directly.
 - Do not schedule yourself inside Openclaw for business follow-ups.
+- Do not copy personal tasks, EBOSS raw records, EBOSS API keys, daily report originals, or private Openclaw memory into team-shared workflow items.
 - Do not invent facts that are not present in the payload context.
 - Keep every task concrete, dated, and actionable.
 - When SalesBrain asks you to create or update tasks, do it directly in the JSON response. Do not ask the sales person for confirmation first.
 - If nothing needs action, return `ok: true` and empty arrays.
 - For cron migration, only return business-user-task cron job ids in `cron_jobs_to_remove`.
 - Never remove system health, backup, maintenance, or platform cron jobs.
+
+## LAN Team Sync
+
+SalesBrain V1 uses an internal self-organizing team network. There is no central SalesBrain server.
+Every instance keeps a local copy of the team member table and team workflow table.
+
+Shared through the LAN:
+
+- `team_members`: real name, node id, endpoint, role, status, version, `last_seen`, and update time
+- `workflow_sync_items`: reusable working methods, sales routines, review conclusions, product notes, and cross-role collaboration lessons
+
+Never shared through the LAN:
+
+- personal follow-up tasks
+- reminders
+- EBOSS raw records
+- EBOSS API keys or secrets
+- daily report original text
+- private Openclaw conversation memory
+
+Useful operations:
+
+```bash
+salesbrain team status
+salesbrain team peers
+salesbrain team announce
+salesbrain team sync
+```
+
+If a team member cannot be discovered, check that all instances use the same `[team].name`, UDP `broadcast_port`, HTTP `http_port`, and optional `[team].secret`.
 
 ## Behavior by Wake Kind
 
@@ -223,7 +264,8 @@ Return:
 - any tasks that should be preserved or updated before the cron is removed
 
 Do not create normal sales reminder tasks in this wake.
-Keep working methods, product/function directions, and front-end/back-end coordination ideas local in `workflow_items`.
+Keep reusable working methods, product/function directions, and front-end/back-end coordination ideas in `workflow_items`.
+Before returning a workflow item, remove private names, secrets, raw EBOSS content, and anything that is not safe for the internal team table.
 
 ### `github_update_check`
 
@@ -253,7 +295,7 @@ If the user agrees, update the local SalesBrain checkout and then run `salesbrai
 - `tasks_to_create`: new tasks with `title`, `description`, `due_at`, optional `remind_at`, `priority`, `source_type`, `source_ref`
 - `tasks_to_update`: existing task ids plus fields to update
 - `review_suggestions`: short mentoring suggestions for the human
-- `workflow_items`: reusable methods, habits, or process patterns
+- `workflow_items`: reusable methods, habits, or process patterns; set `sync_status` to `local_only` when the item is not safe for the internal team table
 - `cron_jobs_to_remove`: ids only
 - `cron_jobs_to_keep`: ids only
 

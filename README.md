@@ -13,6 +13,7 @@ What it does:
 - applies Openclaw's structured decisions
 - can inspect Openclaw cron jobs and migrate business tasks into SalesBrain
 - checks GitHub daily and wakes Openclaw to ask before updating SalesBrain
+- forms a LAN team network through broadcast discovery and peer-to-peer incremental sync
 
 SalesBrain is intentionally not an AI model. Openclaw does the thinking.
 Openclaw decides which tasks to create and SalesBrain applies those structured decisions directly.
@@ -55,9 +56,48 @@ salesbrain github check
 salesbrain github mark-installed
 salesbrain tasks list
 salesbrain tasks due
+salesbrain team status
+salesbrain team peers
+salesbrain team announce
+salesbrain team sync
 ```
 
 On Linux, the most stable pattern is to run `salesbrain monitor` on a fixed interval through your process manager or timer, and use `--strict` if you want unhealthy runs to return a non-zero exit code.
+`salesbrain daemon` starts both the local scheduler and the LAN team node by default. Use `salesbrain daemon --no-team` only when another process is already running `salesbrain team serve` on the same instance.
+
+## LAN team sync
+
+SalesBrain V1 does not require a dedicated team server. Each installed instance keeps its own SQLite database and joins the internal network with UDP broadcast discovery plus HTTP peer sync.
+
+Team-shared tables:
+
+- `team_members`: real name, node id, endpoint, role, status, last seen time, version, and update time
+- `workflow_sync_items`: reusable methods, playbooks, review conclusions, product notes, and cross-team collaboration experience
+
+Only workflow items with `sync_status` of `ready` or `synced` are published to peers. Use `local_only` or `ignored` for notes that should stay on one instance.
+
+Always local-only:
+
+- personal follow-up tasks and reminders
+- EBOSS raw records and API keys
+- daily report original content
+- Openclaw private conversation memory
+
+Recommended team config lives in `[team]`:
+
+```toml
+[team]
+enabled = true
+name = "SalesBrain"
+role = "sales"
+http_port = 37611
+broadcast_port = 37610
+broadcast_interval_seconds = 30
+sync_interval_seconds = 60
+secret = ""
+```
+
+If the internal network needs basic trust protection, set the same `secret` on every team member. GitHub remains the cold-start and backup source for code; it is not a central runtime server.
 
 ## Layout
 

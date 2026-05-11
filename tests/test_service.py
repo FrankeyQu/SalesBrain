@@ -115,6 +115,11 @@ def test_morning_analysis_creates_updates_and_reflects(tmp_path, monkeypatch):
     assert service.list_tasks(status="done", limit=10)[0]["id"] == "task-1"
     assert service.list_review_suggestions(status="open", limit=10)[0]["title"] == "Good habit"
     assert service.list_workflow_items(limit=10)[0]["title"] == "Daily follow-up checklist"
+    assert service.list_workflow_items(limit=10)[0]["sync_status"] == "ready"
+    assert any(
+        item["entity_type"] == "workflow_item"
+        for item in service.store.list_team_sync_events(team_name="SalesBrain", limit=10)
+    )
     assert service.openclaw.removed == ["biz-1"]
     service.close()
 

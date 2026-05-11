@@ -15,6 +15,9 @@ When this skill is installed on a fresh machine, the first step is to sync the S
 3. `python -m pip install -e .`
 4. `salesbrain init --sales-name "<sales name>"`
 5. `salesbrain github mark-installed`
+6. Start the long-running scheduler: `salesbrain daemon`
+
+`salesbrain daemon` also starts LAN team discovery and peer sync unless `--no-team` is passed.
 
 ## Wake command
 
@@ -58,6 +61,8 @@ Recommended response shape:
 For `github_update_check`, the `summary` should be a direct question asking the user whether to update SalesBrain. The bridge must not update code without user confirmation.
 For normal sales analysis wakes, Openclaw should create or update tasks directly in JSON and should not ask the sales person for confirmation first.
 For `workflow_reflection`, avoid normal sales reminders and return local learnings as `workflow_items`.
+Workflow items may sync to the internal team table, so they must contain reusable methods rather than personal tasks, EBOSS raw records, API keys, daily report originals, or private Openclaw memory.
+Set `sync_status` to `local_only` when a workflow item should stay on the current instance.
 
 ## Cron listing command
 
@@ -92,5 +97,6 @@ Accept JSON with `job_id` and return:
 ## Notes
 
 - SalesBrain handles scheduling, persistence, and EBOSS sync.
+- SalesBrain handles LAN team member discovery and workflow-item sync.
 - Openclaw handles analysis and structured decisions.
 - The bridge can be a script, a skill wrapper, or a CLI command.

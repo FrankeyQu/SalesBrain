@@ -19,6 +19,7 @@ from .prompts import (
     build_work_followup_prompt,
     build_workflow_reflection_prompt,
 )
+from .team import TeamRuntime, TeamService
 from .timeutil import iso_now, now_in_zone, parse_iso_datetime
 
 
@@ -142,6 +143,7 @@ class SalesBrainService:
         self.store = store or SalesBrainStore(config.db_path)
         self._eboss_client = eboss_client
         self.openclaw = openclaw_adapter or OpenClawAdapter(config)
+        self._team_service: TeamService | None = None
 
     def close(self) -> None:
         self.store.close()
@@ -238,6 +240,9 @@ class SalesBrainService:
         scheduler = SalesBrainScheduler(self, self.store, self.config)
         scheduler.seed_default_jobs()
         github_state = self.ensure_github_baseline()
+        team_state = None
+        if self.config.team_enabled:
+            team_state = self.team().announce_self(status="online")
         return {
             "ok": True,
             "home": str(self.config.home),
@@ -245,6 +250,7 @@ class SalesBrainService:
             "profile": self.store.get_profile(),
             "scheduler_jobs": self.store.list_scheduler_jobs(),
             "github_state": github_state,
+            "team_state": team_state,
         }
 
     def first_run(self, *, now: datetime | None = None) -> dict[str, Any]:
@@ -286,6 +292,11 @@ class SalesBrainService:
             )
         return self._eboss_client
 
+    def team(self) -> TeamService:
+        if self._team_service is None:
+            self._team_service = TeamService(self.config, self.store)
+        return self._team_service
+
     def get_profile(self) -> dict[str, Any]:
         profile = self.store.get_profile() or {}
         return {
@@ -300,6 +311,7 @@ class SalesBrainService:
                 "github_branch": self.config.github_branch,
             },
             "github_state": self.get_github_state(),
+            "team_state": self.team().status() if self.config.team_enabled else {"enabled": False},
         }
 
     def get_github_state(self) -> dict[str, Any]:
@@ -787,10 +799,44 @@ class SalesBrainService:
     def record_workflow(self, item: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
         payload = dict(item)
         payload["now_iso"] = self.now_iso(now)
+        if self.config.team_enabled and "sync_status" not in payload:
+            payload["sync_status"] = "ready"
         for key in ("title", "pattern_type", "summary"):
             if not str(payload.get(key, "")).strip():
                 raise ValueError(f"workflow.{key} is required")
-        return _decode_json_columns(self.store.record_workflow(payload))
+        workflow = _decode_json_columns(self.store.record_workflow(payload))
+        if self.config.team_enabled:
+            self.team().record_workflow_event(workflow)
+        return workflow
+
+    def team_status(self) -> dict[str, Any]:
+        return self.team().status()
+
+    def team_peers(self) -> dict[str, Any]:
+        return {"ok": True, "members": self.team().peers()}
+
+    def team_announce(self) -> dict[str, Any]:
+        member = self.team().announce_self(status="online")
+        broadcast = self.team().broadcast_hello(status="online")
+        return {"ok": True, "member": member, "broadcast": broadcast}
+
+    def team_sync(self) -> dict[str, Any]:
+        from dataclasses import asdict
+
+        results = [asdict(result) for result in self.team().sync_known_peers()]
+        return {
+            "ok": all(not result["errors"] for result in results),
+            "results": results,
+            "members": self.team().peers(),
+        }
+
+    def team_serve(self) -> dict[str, Any]:
+        runtime = TeamRuntime(self.team())
+        try:
+            runtime.run_forever()
+        except KeyboardInterrupt:
+            return {"ok": True, "stopped": True}
+        return {"ok": True}
 
     def record_wake_result(self, wake: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
         payload = dict(wake)

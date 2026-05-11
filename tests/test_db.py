@@ -72,3 +72,46 @@ def test_latest_raw_records_by_type_uses_insert_order(tmp_path):
 
     assert [record["object_name"] for record in records] == ["Newer low id", "Older high id"]
     store.close()
+
+
+def test_team_members_and_events_are_idempotent(tmp_path):
+    store = SalesBrainStore(tmp_path / "salesbrain.sqlite")
+    store.init_schema()
+
+    member = {
+        "member_id": "SalesBrain:node-a",
+        "team_name": "SalesBrain",
+        "node_id": "node-a",
+        "real_name": "Alice",
+        "endpoint": "http://10.0.0.8:37611",
+        "role": "sales",
+        "status": "online",
+        "version": 1,
+        "last_seen_at": "2026-05-11T08:00:00+08:00",
+        "updated_at": "2026-05-11T08:00:00+08:00",
+        "payload_json": {"source": "test"},
+    }
+    store.upsert_team_member(member)
+    stale = dict(member)
+    stale["real_name"] = "Old Alice"
+    stale["version"] = 0
+    stale["updated_at"] = "2026-05-10T08:00:00+08:00"
+    store.upsert_team_member(stale)
+
+    assert store.get_team_member("SalesBrain:node-a")["real_name"] == "Alice"
+
+    event = {
+        "event_id": "event-1",
+        "event_type": "upsert",
+        "entity_type": "team_member",
+        "entity_id": "SalesBrain:node-a",
+        "team_name": "SalesBrain",
+        "origin_node_id": "node-a",
+        "version": 1,
+        "created_at": "2026-05-11T08:00:00+08:00",
+        "payload_json": {"member": member},
+    }
+    assert store.insert_team_sync_event(event) is True
+    assert store.insert_team_sync_event(event) is False
+    assert len(store.list_team_sync_events(team_name="SalesBrain", limit=10)) == 1
+    store.close()
