@@ -30,3 +30,47 @@ def test_write_and_load_config_uses_local_paths(tmp_path, monkeypatch):
     assert cfg.work_followup_times == ("08:30", "13:30", "19:30")
     assert cfg.daily_report_review_time == "22:00"
     assert cfg.weekly_summary_time == "fri 17:30"
+
+
+def test_relative_config_paths_resolve_from_config_directory(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.toml"
+    secret_file = tmp_path / "secrets" / "eboss-api-key.txt"
+    secret_file.parent.mkdir(parents=True, exist_ok=True)
+    secret_file.write_text("relative-secret", encoding="utf-8")
+    (tmp_path / "elsewhere").mkdir()
+    config_path.write_text(
+        """
+[profile]
+sales_name = "Alice"
+timezone = "Asia/Shanghai"
+
+[eboss]
+base_url = "http://example.com/api"
+api_key_file = "./secrets/eboss-api-key.txt"
+
+[openclaw]
+cron_jobs_path = "./cron/jobs.json"
+
+[runtime]
+home = "./salesbrain"
+db_path = "./salesbrain/salesbrain.sqlite"
+logs_dir = "./salesbrain/logs"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(tmp_path / "elsewhere")
+    monkeypatch.delenv("SALESBRAIN_HOME", raising=False)
+    monkeypatch.delenv("SALESBRAIN_DB_PATH", raising=False)
+    monkeypatch.delenv("OPENCLAW_CRON_JOBS_PATH", raising=False)
+    monkeypatch.delenv("EBOSS_API_KEY", raising=False)
+    monkeypatch.delenv("EBOSS_API_KEY_FILE", raising=False)
+
+    cfg = load_config(config_path)
+
+    assert cfg.home == (tmp_path / "salesbrain").resolve()
+    assert cfg.db_path == (tmp_path / "salesbrain" / "salesbrain.sqlite").resolve()
+    assert cfg.logs_dir == (tmp_path / "salesbrain" / "logs").resolve()
+    assert cfg.openclaw_cron_jobs_path == (tmp_path / "cron" / "jobs.json").resolve()
+    assert cfg.eboss_api_key_file == secret_file.resolve()
+    assert cfg.eboss_api_key == "relative-secret"

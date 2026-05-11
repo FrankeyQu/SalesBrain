@@ -433,10 +433,7 @@ class SalesBrainStore:
             SELECT *
             FROM eboss_raw_records
             WHERE object_type = ?
-            ORDER BY
-              CASE WHEN object_id IS NULL THEN 1 ELSE 0 END,
-              object_id DESC,
-              id DESC
+            ORDER BY id DESC
             LIMIT ?
             """,
             (object_type, limit),
@@ -851,6 +848,27 @@ class SalesBrainStore:
             "SELECT * FROM scheduler_jobs ORDER BY next_run_at ASC, job_name ASC"
         ).fetchall()
         return rows_to_dicts(rows)
+
+    def set_scheduler_job_enabled(
+        self,
+        job_name: str,
+        enabled: bool,
+        *,
+        payload_json: dict[str, Any] | None = None,
+    ) -> None:
+        with self.transaction():
+            self.conn.execute(
+                """
+                UPDATE scheduler_jobs
+                SET enabled = ?, payload_json = ?
+                WHERE job_name = ?
+                """,
+                (
+                    1 if enabled else 0,
+                    json.dumps(payload_json or {}, ensure_ascii=False),
+                    job_name,
+                ),
+            )
 
     def set_state(self, key: str, value: str, *, now_iso: str) -> None:
         with self.transaction():

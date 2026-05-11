@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from dataclasses import replace
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -87,3 +88,29 @@ def test_seed_default_jobs_preserves_existing_next_run(tmp_path):
     scheduler.seed_default_jobs()
 
     assert store.get_scheduler_job("morning_analysis")["next_run_at"] == "2026-05-11T06:05:00+08:00"
+
+
+def test_seed_default_jobs_reconciles_config_changes(tmp_path):
+    config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")
+    cfg = load_config(config_path)
+    store = SalesBrainStore(tmp_path / "salesbrain.sqlite")
+    store.init_schema()
+
+    scheduler = SalesBrainScheduler(SimpleNamespace(), store, cfg)
+    scheduler.seed_default_jobs()
+
+    changed_cfg = replace(
+        load_config(config_path),
+        morning_analysis_time="07:00",
+        work_followup_times=("09:00", "15:00"),
+    )
+    changed_scheduler = SalesBrainScheduler(SimpleNamespace(), store, changed_cfg)
+    changed_scheduler.seed_default_jobs()
+
+    jobs = {job["job_name"]: job for job in store.list_scheduler_jobs()}
+    assert jobs["morning_analysis"]["schedule_value"] == "07:00"
+    assert jobs["work_followup_0900"]["enabled"] == 1
+    assert jobs["work_followup_1500"]["enabled"] == 1
+    assert jobs["work_followup_0830"]["enabled"] == 0
+    assert jobs["work_followup_1330"]["enabled"] == 0
+    assert jobs["work_followup_1930"]["enabled"] == 0

@@ -330,6 +330,8 @@ def main(argv: list[str] | None = None) -> int:
         _dump({"ok": False, "error": type(exc).__name__, "message": str(exc)})
         return 1
     _dump(result)
+    if isinstance(result, dict) and result.get("ok") is False:
+        return 1
     if getattr(args, "command", "") == "monitor" and getattr(args, "strict", False):
         if isinstance(result, dict) and result.get("health_level") != "healthy":
             return 2

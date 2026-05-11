@@ -50,3 +50,25 @@ def test_tasks_preserve_payload_and_due_queries(tmp_path):
     due = store.list_due_tasks("2026-05-11T10:30:00+08:00")
     assert [row["title"] for row in due] == ["Due task"]
     store.close()
+
+
+def test_latest_raw_records_by_type_uses_insert_order(tmp_path):
+    store = SalesBrainStore(tmp_path / "salesbrain.sqlite")
+    store.init_schema()
+    run_id = store.insert_sync_run(run_type="eboss_sync", started_at="2026-05-11T02:00:00+08:00")
+
+    store.insert_raw_records(
+        sync_run_id=run_id,
+        api_id="get-project-list",
+        object_type="project",
+        records=[
+            {"id": "9", "name": "Older high id"},
+            {"id": "1", "name": "Newer low id"},
+        ],
+        fetched_at="2026-05-11T02:00:00+08:00",
+    )
+
+    records = store.latest_raw_records_by_type("project", limit=2)
+
+    assert [record["object_name"] for record in records] == ["Newer low id", "Older high id"]
+    store.close()

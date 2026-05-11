@@ -19,6 +19,13 @@ def _expand(path: str | Path) -> Path:
     return Path(path).expanduser().resolve()
 
 
+def _expand_from(path: str | Path, base: Path) -> Path:
+    target = Path(path).expanduser()
+    if not target.is_absolute():
+        target = base / target
+    return target.resolve()
+
+
 def _parse_int(value: Any, default: int) -> int:
     try:
         return int(value)
@@ -134,7 +141,7 @@ def _read_config_file(config_path: Path) -> dict[str, Any]:
         return tomllib.load(fh)
 
 
-def _resolve_eboss_api_key(config_data: dict[str, Any], home: Path) -> str:
+def _resolve_eboss_api_key(config_data: dict[str, Any], home: Path, config_dir: Path) -> str:
     env_key = _env("EBOSS_API_KEY")
     if env_key:
         return env_key
@@ -143,11 +150,10 @@ def _resolve_eboss_api_key(config_data: dict[str, Any], home: Path) -> str:
     key_file = _env("EBOSS_API_KEY_FILE")
     if key_file:
         path = _expand(key_file)
+    elif eboss_section.get("api_key_file"):
+        path = _expand_from(eboss_section["api_key_file"], config_dir)
     else:
-        path = _expand(
-            eboss_section.get("api_key_file")
-            or (home / "secrets" / "eboss-api-key.txt")
-        )
+        path = _expand(home / "secrets" / "eboss-api-key.txt")
     if path.exists():
         return path.read_text(encoding="utf-8").strip()
     return ""
@@ -155,6 +161,7 @@ def _resolve_eboss_api_key(config_data: dict[str, Any], home: Path) -> str:
 
 def load_config(config_path: str | Path | None = None) -> SalesBrainConfig:
     config_path = _expand(config_path or default_config_path())
+    config_dir = config_path.parent
     data = _read_config_file(config_path)
     profile = data.get("profile", {})
     eboss = data.get("eboss", {})
@@ -163,15 +170,37 @@ def load_config(config_path: str | Path | None = None) -> SalesBrainConfig:
     github = data.get("github", {})
     runtime = data.get("runtime", {})
 
-    home = _expand(
-        _env("SALESBRAIN_HOME")
-        or runtime.get("home")
-        or config_path.parent
-    )
-    db_path = _env("SALESBRAIN_DB_PATH") or runtime.get("db_path") or (home / "salesbrain.sqlite")
-    logs_dir = runtime.get("logs_dir") or (home / "logs")
-    cron_jobs_path = _env("OPENCLAW_CRON_JOBS_PATH") or openclaw.get("cron_jobs_path") or (home / "cron" / "jobs.json")
-    eboss_api_key_file = _env("EBOSS_API_KEY_FILE") or eboss.get("api_key_file") or (home / "secrets" / "eboss-api-key.txt")
+    home_env = _env("SALESBRAIN_HOME")
+    home = _expand(home_env) if home_env else _expand_from(runtime.get("home") or config_path.parent, config_dir)
+
+    db_path_env = _env("SALESBRAIN_DB_PATH")
+    if db_path_env:
+        db_path = _expand(db_path_env)
+    elif runtime.get("db_path"):
+        db_path = _expand_from(runtime["db_path"], config_dir)
+    else:
+        db_path = home / "salesbrain.sqlite"
+
+    if runtime.get("logs_dir"):
+        logs_dir = _expand_from(runtime["logs_dir"], config_dir)
+    else:
+        logs_dir = home / "logs"
+
+    cron_jobs_path_env = _env("OPENCLAW_CRON_JOBS_PATH")
+    if cron_jobs_path_env:
+        cron_jobs_path = _expand(cron_jobs_path_env)
+    elif openclaw.get("cron_jobs_path"):
+        cron_jobs_path = _expand_from(openclaw["cron_jobs_path"], config_dir)
+    else:
+        cron_jobs_path = home / "cron" / "jobs.json"
+
+    eboss_api_key_file_env = _env("EBOSS_API_KEY_FILE")
+    if eboss_api_key_file_env:
+        eboss_api_key_file = _expand(eboss_api_key_file_env)
+    elif eboss.get("api_key_file"):
+        eboss_api_key_file = _expand_from(eboss["api_key_file"], config_dir)
+    else:
+        eboss_api_key_file = home / "secrets" / "eboss-api-key.txt"
 
     cfg = SalesBrainConfig(
         home=home,
@@ -181,7 +210,7 @@ def load_config(config_path: str | Path | None = None) -> SalesBrainConfig:
         sales_name=_env("SALESBRAIN_SALES_NAME") or str(profile.get("sales_name", "")).strip(),
         timezone=_env("SALESBRAIN_TIMEZONE") or str(profile.get("timezone", "Asia/Shanghai")).strip() or "Asia/Shanghai",
         eboss_base_url=_env("EBOSS_BASE_URL") or str(eboss.get("base_url", "http://10.21.14.4:30010/api")).strip() or "http://10.21.14.4:30010/api",
-        eboss_api_key=_resolve_eboss_api_key(data, home),
+        eboss_api_key=_resolve_eboss_api_key(data, home, config_dir),
         eboss_api_key_file=_expand(eboss_api_key_file),
         eboss_timeout_seconds=_parse_int(_env("EBOSS_TIMEOUT_SECONDS") or eboss.get("timeout_seconds"), 240),
         eboss_page_size=_parse_int(_env("EBOSS_PAGE_SIZE") or eboss.get("page_size"), 50),

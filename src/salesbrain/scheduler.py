@@ -73,6 +73,17 @@ DEFAULT_JOB_SPECS = [
 ]
 
 
+MANAGED_FIXED_JOB_NAMES = {
+    spec["job_name"]
+    for spec in DEFAULT_JOB_SPECS
+    if not spec["job_name"].startswith("work_followup_")
+}
+
+
+def _is_managed_job(job_name: str) -> bool:
+    return job_name in MANAGED_FIXED_JOB_NAMES or job_name.startswith("work_followup_")
+
+
 def job_specs_from_config(config: SalesBrainConfig) -> list[dict[str, str]]:
     followup_specs = []
     for index, schedule_value in enumerate(config.work_followup_times, start=1):
@@ -132,9 +143,21 @@ class SalesBrainScheduler:
 
     def seed_default_jobs(self, *, force: bool = False) -> None:
         now = now_in_zone(self.config.timezone)
-        for spec in job_specs_from_config(self.config):
+        desired_specs = job_specs_from_config(self.config)
+        desired_names = {spec["job_name"] for spec in desired_specs}
+
+        for spec in desired_specs:
             existing = self.store.get_scheduler_job(spec["job_name"])
-            if existing is not None and not force:
+            spec_changed = bool(
+                existing is not None
+                and (
+                    str(existing.get("handler_name", "")) != spec["handler_name"]
+                    or str(existing.get("schedule_kind", "")) != spec["schedule_kind"]
+                    or str(existing.get("schedule_value", "")) != spec["schedule_value"]
+                    or int(existing.get("enabled", 1)) != 1
+                )
+            )
+            if existing is not None and not force and not spec_changed:
                 continue
             next_run = compute_next_run(now, spec["schedule_kind"], spec["schedule_value"])
             self.store.upsert_scheduler_job(
@@ -145,6 +168,21 @@ class SalesBrainScheduler:
                 next_run_at=next_run.isoformat(timespec="seconds"),
                 enabled=True,
                 payload_json={},
+            )
+
+        for job in self.store.list_scheduler_jobs():
+            job_name = str(job.get("job_name", ""))
+            if job_name in desired_names or not _is_managed_job(job_name):
+                continue
+            if int(job.get("enabled", 1)) != 1:
+                continue
+            self.store.set_scheduler_job_enabled(
+                job_name,
+                False,
+                payload_json={
+                    "disabled_by": "salesbrain_config_reconcile",
+                    "disabled_at": now.isoformat(timespec="seconds"),
+                },
             )
 
     def run_due_jobs(self, *, now=None) -> list[SchedulerRunResult]:
