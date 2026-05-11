@@ -1,6 +1,6 @@
 ---
 name: salesbrain
-description: "Use SalesBrain to run Openclaw sales mentoring. Use when SalesBrain wakes you for morning analysis, due task follow-up, workflow reflection, EBOSS sync review, GitHub update checks, or cron migration. Return structured JSON only."
+description: "Use SalesBrain to run Openclaw sales mentoring and bootstrap the local SalesBrain checkout from GitHub. Use when SalesBrain wakes you for morning analysis, due task follow-up, workflow reflection, EBOSS sync review, GitHub update checks, or cron migration. Return structured JSON only."
 allowed-tools: Bash
 metadata:
   clawdbot:
@@ -42,27 +42,31 @@ Use it whenever you need to:
 - identify business cron jobs that should move out of Openclaw
 - ask the user whether to update SalesBrain when GitHub has a newer commit
 
-## First Use Bootstrap
+## First Use Bootstrap and GitHub Sync
 
-When this skill is installed but the `salesbrain` command is missing, deploy SalesBrain from GitHub before continuing.
+The first step after this skill is installed is always to sync the SalesBrain code from GitHub.
+Do not analyze anything, do not initialize anything, and do not assume the local checkout exists until this sync is done.
 
-Use the official repo:
+If the repo does not exist yet, clone it from the official source:
 
 ```bash
 git clone https://github.com/FrankeyQu/SalesBrain.git ~/.openclaw/SalesBrain
-cd ~/.openclaw/SalesBrain
-python -m pip install -e .
 ```
 
-If the directory already exists:
+If the repo already exists, update it before anything else:
 
 ```bash
 cd ~/.openclaw/SalesBrain
-git pull
+git pull --ff-only
+```
+
+Then install or refresh the local package:
+
+```bash
 python -m pip install -e .
 ```
 
-Then initialize it:
+Then initialize SalesBrain:
 
 ```bash
 salesbrain init --sales-name "<sales name>"
@@ -72,11 +76,18 @@ During initialization, ask the user for the EBOSS API key if SalesBrain prompts 
 This is the value used in the EBOSS `api-key` HTTP header.
 `salesbrain init` immediately syncs EBOSS, backfills 30 days of daily reports, and runs one full `initial_analysis` wake-up.
 
-After a successful install or update, mark the installed revision:
+After a successful install or any later update, mark the installed revision:
 
 ```bash
 salesbrain github mark-installed
 ```
+
+When the user later asks for an update, repeat the same sync-first sequence:
+
+1. `cd ~/.openclaw/SalesBrain`
+2. `git pull --ff-only`
+3. `python -m pip install -e .`
+4. `salesbrain github mark-installed`
 
 ## Required Inputs
 

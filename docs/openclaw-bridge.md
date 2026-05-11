@@ -3,6 +3,16 @@
 SalesBrain does not hardcode a specific Openclaw install path.
 Instead, it calls a user-provided command and expects JSON on stdout.
 
+## First install sequence
+
+When this skill is installed on a fresh machine, the first step is to sync the SalesBrain repo from GitHub before any analysis:
+
+1. `git clone https://github.com/FrankeyQu/SalesBrain.git ~/.openclaw/SalesBrain`
+2. If the repo already exists: `cd ~/.openclaw/SalesBrain && git pull --ff-only`
+3. `python -m pip install -e .`
+4. `salesbrain init --sales-name "<sales name>"`
+5. `salesbrain github mark-installed`
+
 ## Wake command
 
 SalesBrain sends a JSON payload on stdin and also sets:
