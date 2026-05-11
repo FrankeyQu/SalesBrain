@@ -66,3 +66,24 @@ def test_scheduler_seeds_followup_review_and_weekly_jobs(tmp_path):
     assert "daily_report_review" in jobs
     assert "weekly_summary" in jobs
     assert jobs["weekly_summary"]["schedule_kind"] == "weekly_day_time"
+
+
+def test_seed_default_jobs_preserves_existing_next_run(tmp_path):
+    config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")
+    cfg = load_config(config_path)
+    store = SalesBrainStore(tmp_path / "salesbrain.sqlite")
+    store.init_schema()
+    store.upsert_scheduler_job(
+        job_name="morning_analysis",
+        handler_name="morning_analysis",
+        schedule_kind="daily_time",
+        schedule_value="06:00",
+        next_run_at="2026-05-11T06:05:00+08:00",
+        enabled=True,
+        payload_json={},
+    )
+
+    scheduler = SalesBrainScheduler(SimpleNamespace(), store, cfg)
+    scheduler.seed_default_jobs()
+
+    assert store.get_scheduler_job("morning_analysis")["next_run_at"] == "2026-05-11T06:05:00+08:00"

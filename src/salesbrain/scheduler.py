@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from .config import SalesBrainConfig
@@ -124,9 +124,18 @@ class SalesBrainScheduler:
         self.store = store
         self.config = config
 
+    def touch_heartbeat(self, *, now=None) -> str:
+        now = now or now_in_zone(self.config.timezone)
+        now_iso = now.isoformat(timespec="seconds")
+        self.store.set_state("scheduler_daemon_heartbeat_at", now_iso, now_iso=now_iso)
+        return now_iso
+
     def seed_default_jobs(self, *, force: bool = False) -> None:
         now = now_in_zone(self.config.timezone)
         for spec in job_specs_from_config(self.config):
+            existing = self.store.get_scheduler_job(spec["job_name"])
+            if existing is not None and not force:
+                continue
             next_run = compute_next_run(now, spec["schedule_kind"], spec["schedule_value"])
             self.store.upsert_scheduler_job(
                 job_name=spec["job_name"],
@@ -145,6 +154,7 @@ class SalesBrainScheduler:
         due_jobs = self.store.list_due_scheduler_jobs(now_iso)
         for job in due_jobs:
             started_at = now.isoformat(timespec="seconds")
+            started_perf = time.perf_counter()
             try:
                 handler_name = str(job["handler_name"])
                 handler = getattr(self.service, handler_name)
@@ -163,6 +173,7 @@ class SalesBrainScheduler:
                 detail = {"ok": False, "error": type(exc).__name__, "message": str(exc)}
                 status = "failed"
             finished_at = now_in_zone(self.config.timezone).isoformat(timespec="seconds")
+            duration_seconds = round(max(0.0, time.perf_counter() - started_perf), 3)
             next_run = compute_next_run(now, str(job["schedule_kind"]), str(job["schedule_value"]))
             self.store.update_scheduler_job_run(
                 str(job["job_name"]),
@@ -171,6 +182,21 @@ class SalesBrainScheduler:
                 payload_json={
                     "status": status,
                     "detail": detail,
+                },
+            )
+            self.store.record_scheduler_job_run(
+                job_name=str(job["job_name"]),
+                handler_name=handler_name,
+                started_at=started_at,
+                finished_at=finished_at,
+                status=status,
+                duration_seconds=duration_seconds,
+                error=None if status == "success" else str(detail.get("error") or detail.get("message") or ""),
+                detail_json=detail if isinstance(detail, dict) else {"raw": detail},
+                payload_json={
+                    "scheduled_next_run_at": str(job.get("next_run_at", "")),
+                    "schedule_kind": str(job.get("schedule_kind", "")),
+                    "schedule_value": str(job.get("schedule_value", "")),
                 },
             )
             results.append(
@@ -189,5 +215,6 @@ class SalesBrainScheduler:
     def run_forever(self, *, sleep_seconds: int | None = None) -> None:
         sleep_seconds = sleep_seconds or self.config.scheduler_tick_seconds
         while True:
+            self.touch_heartbeat()
             self.run_due_jobs()
             time.sleep(max(1, sleep_seconds))

@@ -151,6 +151,36 @@ def test_first_run_syncs_then_runs_initial_analysis(tmp_path, monkeypatch):
     service.close()
 
 
+def test_monitor_scheduler_reports_and_records_failed_jobs(tmp_path, monkeypatch):
+    monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
+    config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")
+    cfg = load_config(config_path)
+    service = SalesBrainService(cfg, eboss_client=FakeEbossClient(), openclaw_adapter=DummyOpenClaw())
+    service.bootstrap()
+
+    fixed_now = datetime(2026, 5, 11, 13, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    service.store.upsert_scheduler_job(
+        job_name="work_followup_0830",
+        handler_name="work_followup",
+        schedule_kind="daily_time",
+        schedule_value="08:30",
+        next_run_at="2026-05-11T13:29:00+08:00",
+        enabled=True,
+        payload_json={},
+    )
+    service.work_followup = lambda *, now=None: {"ok": False, "wake_run": {"status": "failed"}}  # type: ignore[method-assign]
+
+    report = service.monitor_scheduler(now=fixed_now)
+
+    assert report["health_level"] == "degraded"
+    assert report["due_jobs_on_entry"][0]["job_name"] == "work_followup_0830"
+    assert report["run_results"][0]["status"] == "failed"
+    assert report["failed_jobs"][0]["job_name"] == "work_followup_0830"
+    assert service.store.list_scheduler_job_runs("work_followup_0830", limit=1)[0]["status"] == "failed"
+    assert service.get_monitor_state()["last_run_at"] == "2026-05-11T13:30:00+08:00"
+    service.close()
+
+
 def test_github_update_check_wakes_openclaw_when_remote_is_newer(tmp_path, monkeypatch):
     monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit("new-sha"))
     config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")

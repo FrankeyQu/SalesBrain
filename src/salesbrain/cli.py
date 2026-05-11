@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 import json
 import os
 import sys
@@ -98,6 +99,7 @@ def cmd_status(args: argparse.Namespace) -> dict[str, Any]:
     def _run(service: SalesBrainService) -> dict[str, Any]:
         return {
             "profile": service.get_profile(),
+            "monitor_state": service.get_monitor_state(),
             "scheduler_jobs": service.list_scheduler_jobs(),
             "pending_tasks": service.list_tasks(status="pending", limit=20),
             "due_tasks": service.list_due_tasks(limit=20),
@@ -117,13 +119,20 @@ def cmd_daemon(args: argparse.Namespace) -> dict[str, Any]:
         if args.once:
             return {
                 "ok": True,
-                "results": [result.__dict__ for result in scheduler.run_due_jobs()],
+                "results": [asdict(result) for result in scheduler.run_due_jobs()],
             }
         try:
             scheduler.run_forever()
         except KeyboardInterrupt:
             return {"ok": True, "stopped": True}
         return {"ok": True}
+
+    return _run_with_service(args.config, _run)
+
+
+def cmd_monitor(args: argparse.Namespace) -> dict[str, Any]:
+    def _run(service: SalesBrainService) -> dict[str, Any]:
+        return service.monitor_scheduler(repair=not args.report_only)
 
     return _run_with_service(args.config, _run)
 
@@ -247,6 +256,11 @@ def build_parser() -> argparse.ArgumentParser:
     daemon.add_argument("--once", action="store_true", help="Run due jobs once and exit")
     daemon.set_defaults(func=cmd_daemon)
 
+    monitor = sub.add_parser("monitor", parents=[common], help="Run a health check and repair due jobs once")
+    monitor.add_argument("--report-only", action="store_true", help="Do not run due jobs, only report health")
+    monitor.add_argument("--strict", action="store_true", help="Exit non-zero when the monitor reports degradation")
+    monitor.set_defaults(func=cmd_monitor)
+
     wake = sub.add_parser("wake", parents=[common], help="Wake Openclaw for a specific review pass")
     wake_sub = wake.add_subparsers(dest="kind", required=True)
     for kind in ("initial", "morning", "followup", "review", "weekly", "due", "workflow"):
@@ -316,6 +330,9 @@ def main(argv: list[str] | None = None) -> int:
         _dump({"ok": False, "error": type(exc).__name__, "message": str(exc)})
         return 1
     _dump(result)
+    if getattr(args, "command", "") == "monitor" and getattr(args, "strict", False):
+        if isinstance(result, dict) and result.get("health_level") != "healthy":
+            return 2
     return 0
 
 

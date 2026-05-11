@@ -35,6 +35,7 @@ def test_cli_init_and_status(tmp_path, monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "Alice" in output
     assert "scheduler_jobs" in output
+    assert "monitor_state" in output
 
 
 def test_cli_init_prompts_for_eboss_key(tmp_path, monkeypatch, capsys):
@@ -50,3 +51,25 @@ def test_cli_init_prompts_for_eboss_key(tmp_path, monkeypatch, capsys):
     assert main(["init", "--config", str(config_path), "--sales-name", "Alice"]) == 0
     capsys.readouterr()
     assert (config_path.parent / "secrets" / "eboss-api-key.txt").read_text(encoding="utf-8") == "prompted-key"
+
+
+def test_cli_monitor_command(tmp_path, monkeypatch, capsys):
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setattr("salesbrain.cli.sys.stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("salesbrain.cli.getpass.getpass", lambda prompt: "prompted-key")
+    monkeypatch.setattr(
+        "salesbrain.cli.SalesBrainService.first_run",
+        lambda self, *args, **kwargs: {"ok": True, "sync_result": {"ok": True}, "analysis_result": {"ok": True}},
+    )
+    monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
+    monkeypatch.setattr(
+        "salesbrain.cli.SalesBrainService.monitor_scheduler",
+        lambda self, *args, **kwargs: {"ok": True, "health_level": "healthy", "job_health": []},
+    )
+
+    assert main(["init", "--config", str(config_path), "--sales-name", "Alice"]) == 0
+    capsys.readouterr()
+
+    assert main(["--config", str(config_path), "monitor", "--report-only"]) == 0
+    output = capsys.readouterr().out
+    assert "health_level" in output

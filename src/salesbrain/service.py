@@ -30,6 +30,11 @@ GITHUB_LAST_CHECKED_AT_KEY = "github_last_checked_at"
 GITHUB_LAST_PROMPTED_REVISION_KEY = "github_last_prompted_revision"
 GITHUB_BACKFILL_DONE_KEY = "eboss_daily_report_backfill_done"
 FIRST_RUN_DONE_KEY = "salesbrain_first_run_done"
+DAEMON_HEARTBEAT_KEY = "scheduler_daemon_heartbeat_at"
+MONITOR_LAST_RUN_KEY = "scheduler_monitor_last_run_at"
+MONITOR_LAST_REPORT_KEY = "scheduler_monitor_last_report_json"
+MONITOR_LAST_ALERT_SIGNATURE_KEY = "scheduler_monitor_last_alert_signature"
+MONITOR_STALE_SECONDS = 180
 
 
 def _loads(value: Any, default: Any) -> Any:
@@ -74,6 +79,30 @@ def _compact_records(records: list[dict[str, Any]], limit: int) -> list[dict[str
             }
         )
     return compact
+
+
+def _latest_iso(values: list[str | None]) -> str | None:
+    parsed: list[datetime] = []
+    for value in values:
+        if not value:
+            continue
+        try:
+            parsed.append(parse_iso_datetime(str(value)))
+        except Exception:
+            continue
+    if not parsed:
+        return None
+    return max(parsed).isoformat(timespec="seconds")
+
+
+def _seconds_since(older_iso: str | None, newer: datetime) -> int | None:
+    if not older_iso:
+        return None
+    try:
+        delta = newer - parse_iso_datetime(str(older_iso))
+    except Exception:
+        return None
+    return max(0, int(delta.total_seconds()))
 
 
 def normalize_decision(raw: dict[str, Any]) -> dict[str, Any]:
@@ -282,6 +311,18 @@ class SalesBrainService:
             "last_checked_revision": self.store.get_state(GITHUB_LAST_CHECKED_REVISION_KEY),
             "last_checked_at": self.store.get_state(GITHUB_LAST_CHECKED_AT_KEY),
             "last_prompted_revision": self.store.get_state(GITHUB_LAST_PROMPTED_REVISION_KEY),
+        }
+
+    def get_monitor_state(self) -> dict[str, Any]:
+        report_raw = self.store.get_state(MONITOR_LAST_REPORT_KEY)
+        report: dict[str, Any] | None = None
+        if report_raw:
+            report = _loads(report_raw, None)
+        return {
+            "daemon_last_heartbeat_at": self.store.get_state(DAEMON_HEARTBEAT_KEY),
+            "last_run_at": self.store.get_state(MONITOR_LAST_RUN_KEY),
+            "last_alert_signature": self.store.get_state(MONITOR_LAST_ALERT_SIGNATURE_KEY),
+            "last_report": report,
         }
 
     def _fetch_github_commit(self) -> dict[str, Any]:
@@ -968,3 +1009,161 @@ class SalesBrainService:
         )
         prompt = build_workflow_reflection_prompt(context)
         return self._wake_openclaw(kind="workflow_reflection", prompt=prompt, context=context, now=now)
+
+    def monitor_scheduler(self, *, now: datetime | None = None, repair: bool = True) -> dict[str, Any]:
+        now = now or now_in_zone(self.config.timezone)
+        now_iso = self.now_iso(now)
+        from .scheduler import SalesBrainScheduler
+
+        scheduler = SalesBrainScheduler(self, self.store, self.config)
+        scheduler.seed_default_jobs()
+
+        previous_monitor_run_at = self.store.get_state(MONITOR_LAST_RUN_KEY)
+        daemon_last_heartbeat_at = self.store.get_state(DAEMON_HEARTBEAT_KEY)
+        engine_last_activity_before = _latest_iso([previous_monitor_run_at, daemon_last_heartbeat_at])
+        stale_before_monitor_seconds = _seconds_since(engine_last_activity_before, now)
+        has_previous_activity = engine_last_activity_before is not None
+        stale_before_monitor = bool(
+            has_previous_activity
+            and (stale_before_monitor_seconds is None or stale_before_monitor_seconds > MONITOR_STALE_SECONDS)
+        )
+
+        due_jobs_on_entry = [
+            _decode_json_columns(job)
+            for job in self.store.list_due_scheduler_jobs(now_iso)
+        ]
+        due_job_names = {str(job["job_name"]) for job in due_jobs_on_entry}
+
+        run_results: list[dict[str, Any]] = []
+        if repair and due_jobs_on_entry:
+            from dataclasses import asdict
+
+            run_results = [asdict(result) for result in scheduler.run_due_jobs(now=now)]
+
+        jobs = self.list_scheduler_jobs()
+        job_health: list[dict[str, Any]] = []
+        failed_jobs: list[dict[str, Any]] = []
+        overdue_jobs: list[dict[str, Any]] = []
+        repaired_jobs: list[dict[str, Any]] = []
+        for job in jobs:
+            job_name = str(job.get("job_name", ""))
+            latest_run = self.store.latest_scheduler_job_run(job_name)
+            latest_run = _decode_json_columns(latest_run) if latest_run else None
+            recent_runs = [
+                _decode_json_columns(item)
+                for item in self.store.list_scheduler_job_runs(job_name, limit=5)
+            ]
+            consecutive_failures = 0
+            for run in recent_runs:
+                if str(run.get("status")) == "failed":
+                    consecutive_failures += 1
+                else:
+                    break
+
+            next_run_at = str(job.get("next_run_at", ""))
+            overdue_seconds = _seconds_since(next_run_at, now)
+            due_on_entry = job_name in due_job_names
+            latest_status = str(latest_run.get("status") if latest_run else "never")
+            latest_error = latest_run.get("error") if latest_run else None
+            job_state = "healthy"
+            if latest_status == "failed":
+                job_state = "failed"
+            elif consecutive_failures >= 3:
+                job_state = "unstable"
+            elif due_on_entry and repair:
+                job_state = "repaired"
+            elif due_on_entry:
+                job_state = "overdue"
+
+            health_row = {
+                "job_name": job_name,
+                "handler_name": job.get("handler_name"),
+                "schedule_kind": job.get("schedule_kind"),
+                "schedule_value": job.get("schedule_value"),
+                "next_run_at": next_run_at,
+                "last_run_at": latest_run.get("started_at") if latest_run else job.get("last_run_at"),
+                "latest_status": latest_status,
+                "latest_error": latest_error,
+                "consecutive_failures": consecutive_failures,
+                "overdue_seconds": overdue_seconds,
+                "due_on_entry": due_on_entry,
+                "state": job_state,
+            }
+            job_health.append(health_row)
+            if job_state in {"failed", "unstable"}:
+                failed_jobs.append(health_row)
+            if due_on_entry and not repair:
+                overdue_jobs.append(health_row)
+            if due_on_entry and repair and latest_status == "success":
+                repaired_jobs.append(health_row)
+
+        current_monitor_run_at = now_iso
+        self.store.set_state(MONITOR_LAST_RUN_KEY, current_monitor_run_at, now_iso=now_iso)
+
+        engine_last_activity_at = _latest_iso([current_monitor_run_at, daemon_last_heartbeat_at])
+        engine_age_seconds = _seconds_since(engine_last_activity_at, now)
+
+        health_level = "healthy"
+        if failed_jobs or overdue_jobs or bool(
+            stale_before_monitor
+        ):
+            health_level = "degraded"
+
+        report = {
+            "ok": True,
+            "health_level": health_level,
+            "now": now_iso,
+            "repair_enabled": repair,
+            "daemon_last_heartbeat_at": daemon_last_heartbeat_at,
+            "monitor_last_run_at_before": previous_monitor_run_at,
+            "monitor_last_run_at": current_monitor_run_at,
+            "engine_last_activity_before_monitor": engine_last_activity_before,
+            "engine_stale_before_monitor": stale_before_monitor,
+            "engine_stale_before_monitor_seconds": stale_before_monitor_seconds,
+            "engine_last_activity_at": engine_last_activity_at,
+            "engine_age_seconds": engine_age_seconds,
+            "due_jobs_on_entry": due_jobs_on_entry,
+            "run_results": run_results,
+            "job_health": job_health,
+            "failed_jobs": failed_jobs,
+            "overdue_jobs": overdue_jobs,
+            "repaired_jobs": repaired_jobs,
+            "monitor_tick_seconds": self.config.scheduler_tick_seconds,
+        }
+
+        alert_signature = json.dumps(
+            {
+                "health_level": health_level,
+                "failed_jobs": sorted(job["job_name"] for job in failed_jobs),
+                "overdue_jobs": sorted(job["job_name"] for job in overdue_jobs),
+                "engine_stale_before_monitor": stale_before_monitor,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        alert_created = False
+        alert_error: str | None = None
+        if health_level == "healthy":
+            self.store.delete_state(MONITOR_LAST_ALERT_SIGNATURE_KEY)
+        elif self.store.get_state(MONITOR_LAST_ALERT_SIGNATURE_KEY) != alert_signature:
+            try:
+                self.create_review_suggestion(
+                    {
+                        "title": "SalesBrain 运行监控告警",
+                        "suggestion": "监控发现调度出现异常，请检查失败的 job、Openclaw 返回值、daemon 心跳和最近的补跑情况。",
+                        "source_type": "scheduler_monitor",
+                        "source_ref": now.date().isoformat(),
+                        "payload_json": report,
+                        "now_iso": now_iso,
+                    }
+                )
+                self.store.set_state(MONITOR_LAST_ALERT_SIGNATURE_KEY, alert_signature, now_iso=now_iso)
+                alert_created = True
+            except Exception as exc:
+                alert_error = str(exc)
+
+        if alert_error is not None:
+            report["alert_error"] = alert_error
+        report["alert_created"] = alert_created
+        self.store.set_state(MONITOR_LAST_REPORT_KEY, json.dumps(report, ensure_ascii=False), now_iso=now_iso)
+        return report

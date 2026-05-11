@@ -9,6 +9,7 @@ What it does:
 - runs a first-use EBOSS sync and full Openclaw analysis during `salesbrain init`
 - tracks follow-up tasks, review suggestions, and workflow patterns
 - wakes Openclaw on a fixed schedule: 02:00 sync, 06:00 analysis, 08:30/13:30/19:30 follow-up, 22:00 report review, 23:30 workflow reflection, and weekly summary
+- can run a one-shot health monitor that repairs due jobs and records scheduler health
 - applies Openclaw's structured decisions
 - can inspect Openclaw cron jobs and migrate business tasks into SalesBrain
 - checks GitHub daily and wakes Openclaw to ask before updating SalesBrain
@@ -49,11 +50,14 @@ salesbrain wake review
 salesbrain wake weekly
 salesbrain wake due
 salesbrain wake workflow
+salesbrain monitor
 salesbrain github check
 salesbrain github mark-installed
 salesbrain tasks list
 salesbrain tasks due
 ```
+
+On Linux, the most stable pattern is to run `salesbrain monitor` on a fixed interval through your process manager or timer, and use `--strict` if you want unhealthy runs to return a non-zero exit code.
 
 ## Layout
 

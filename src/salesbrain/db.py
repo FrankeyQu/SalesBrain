@@ -108,6 +108,22 @@ CREATE TABLE IF NOT EXISTS wake_runs (
   payload_json TEXT NOT NULL DEFAULT '{}'
 );
 
+CREATE TABLE IF NOT EXISTS scheduler_job_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_name TEXT NOT NULL,
+  handler_name TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('success', 'failed', 'skipped')),
+  duration_seconds REAL NOT NULL DEFAULT 0,
+  error TEXT,
+  detail_json TEXT NOT NULL DEFAULT '{}',
+  payload_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduler_job_runs_job_started
+  ON scheduler_job_runs(job_name, started_at DESC);
+
 CREATE TABLE IF NOT EXISTS scheduler_jobs (
   job_name TEXT PRIMARY KEY,
   handler_name TEXT NOT NULL,
@@ -704,6 +720,92 @@ class SalesBrainStore:
             "SELECT * FROM wake_runs ORDER BY started_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
+        return rows_to_dicts(rows)
+
+    def record_scheduler_job_run(
+        self,
+        *,
+        job_name: str,
+        handler_name: str,
+        started_at: str,
+        finished_at: str,
+        status: str,
+        duration_seconds: float = 0,
+        error: str | None = None,
+        detail_json: dict[str, Any] | None = None,
+        payload_json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        with self.transaction():
+            cur = self.conn.execute(
+                """
+                INSERT INTO scheduler_job_runs
+                  (job_name, handler_name, started_at, finished_at, status, duration_seconds, error, detail_json, payload_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_name,
+                    handler_name,
+                    started_at,
+                    finished_at,
+                    status,
+                    duration_seconds,
+                    error,
+                    json.dumps(detail_json or {}, ensure_ascii=False),
+                    json.dumps(payload_json or {}, ensure_ascii=False),
+                ),
+            )
+        return self.get_scheduler_job_run(int(cur.lastrowid)) or {
+            "id": int(cur.lastrowid),
+            "job_name": job_name,
+            "handler_name": handler_name,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "status": status,
+            "duration_seconds": duration_seconds,
+            "error": error,
+            "detail_json": json.dumps(detail_json or {}, ensure_ascii=False),
+            "payload_json": json.dumps(payload_json or {}, ensure_ascii=False),
+        }
+
+    def get_scheduler_job_run(self, run_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM scheduler_job_runs WHERE id = ?", (run_id,)).fetchone()
+        return row_to_dict(row)
+
+    def latest_scheduler_job_run(self, job_name: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT *
+            FROM scheduler_job_runs
+            WHERE job_name = ?
+            ORDER BY started_at DESC, id DESC
+            LIMIT 1
+            """,
+            (job_name,),
+        ).fetchone()
+        return row_to_dict(row)
+
+    def list_scheduler_job_runs(self, job_name: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if job_name:
+            rows = self.conn.execute(
+                """
+                SELECT *
+                FROM scheduler_job_runs
+                WHERE job_name = ?
+                ORDER BY started_at DESC, id DESC
+                LIMIT ?
+                """,
+                (job_name, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT *
+                FROM scheduler_job_runs
+                ORDER BY started_at DESC, id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
         return rows_to_dicts(rows)
 
     def upsert_scheduler_job(
