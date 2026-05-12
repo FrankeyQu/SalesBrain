@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import uuid
@@ -97,6 +98,28 @@ CREATE TABLE IF NOT EXISTS workflow_sync_items (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS workflow_inbox_items (
+  id TEXT PRIMARY KEY,
+  source_node_id TEXT,
+  source_event_id TEXT,
+  title TEXT NOT NULL,
+  pattern_type TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  example_json TEXT NOT NULL DEFAULT '{}',
+  source_task_ids_json TEXT NOT NULL DEFAULT '[]',
+  similarity_score REAL NOT NULL DEFAULT 0,
+  dedupe_status TEXT NOT NULL CHECK (dedupe_status IN ('duplicate', 'needs_review', 'pending_review')),
+  review_status TEXT NOT NULL CHECK (review_status IN ('pending', 'accepted', 'merged', 'ignored', 'duplicate')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_inbox_source_event
+  ON workflow_inbox_items(source_event_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_inbox_review
+  ON workflow_inbox_items(review_status, dedupe_status);
+
 CREATE TABLE IF NOT EXISTS team_members (
   member_id TEXT PRIMARY KEY,
   team_name TEXT NOT NULL,
@@ -188,6 +211,28 @@ def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
 
 def rows_to_dicts(rows: list[sqlite3.Row] | tuple[sqlite3.Row, ...]) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
+
+
+def normalize_text(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip().lower())
+
+
+def rough_similarity(left: str, right: str) -> float:
+    left_norm = normalize_text(left)
+    right_norm = normalize_text(right)
+    if not left_norm or not right_norm:
+        return 0.0
+    if left_norm == right_norm:
+        return 1.0
+    shorter, longer = sorted((left_norm, right_norm), key=len)
+    if shorter and shorter in longer:
+        return len(shorter) / len(longer)
+    left_chars = set(left_norm)
+    right_chars = set(right_norm)
+    union = left_chars | right_chars
+    if not union:
+        return 0.0
+    return len(left_chars & right_chars) / len(union)
 
 
 class SalesBrainStore:
@@ -731,6 +776,121 @@ class SalesBrainStore:
             (limit,),
         ).fetchall()
         return rows_to_dicts(rows)
+
+    def classify_workflow_candidate(self, item: dict[str, Any]) -> tuple[str, float]:
+        title = str(item.get("title") or "")
+        summary = str(item.get("summary") or "")
+        candidates = self.conn.execute(
+            """
+            SELECT title, summary
+            FROM workflow_sync_items
+            ORDER BY updated_at DESC
+            LIMIT 500
+            """
+        ).fetchall()
+        best = 0.0
+        for row in candidates:
+            title_score = rough_similarity(title, str(row["title"]))
+            summary_score = rough_similarity(summary, str(row["summary"]))
+            score = max(title_score, summary_score)
+            best = max(best, score)
+            if title_score >= 1.0:
+                return "duplicate", 1.0
+        if best >= 0.82:
+            return "needs_review", best
+        return "pending_review", best
+
+    def upsert_workflow_inbox_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        now_iso = str(item["now_iso"])
+        dedupe_status, similarity_score = self.classify_workflow_candidate(item)
+        inbox_id = str(item.get("id") or uuid.uuid4().hex)
+        source_event_id = item.get("source_event_id")
+        row = {
+            "id": inbox_id,
+            "source_node_id": item.get("source_node_id"),
+            "source_event_id": source_event_id,
+            "title": str(item["title"]).strip(),
+            "pattern_type": str(item["pattern_type"]).strip(),
+            "summary": str(item["summary"]).strip(),
+            "example_json": json.dumps(item.get("example_json") or {}, ensure_ascii=False),
+            "source_task_ids_json": json.dumps(item.get("source_task_ids_json") or [], ensure_ascii=False),
+            "similarity_score": float(item.get("similarity_score", similarity_score)),
+            "dedupe_status": str(item.get("dedupe_status") or dedupe_status),
+            "review_status": str(item.get("review_status") or "pending"),
+            "created_at": str(item.get("created_at") or now_iso),
+            "updated_at": str(item.get("updated_at") or now_iso),
+            "payload_json": json.dumps(item.get("payload_json") or {}, ensure_ascii=False),
+        }
+        with self.transaction():
+            self.conn.execute(
+                """
+                INSERT INTO workflow_inbox_items
+                  (id, source_node_id, source_event_id, title, pattern_type, summary,
+                   example_json, source_task_ids_json, similarity_score, dedupe_status,
+                   review_status, created_at, updated_at, payload_json)
+                VALUES
+                  (:id, :source_node_id, :source_event_id, :title, :pattern_type, :summary,
+                   :example_json, :source_task_ids_json, :similarity_score, :dedupe_status,
+                   :review_status, :created_at, :updated_at, :payload_json)
+                ON CONFLICT(id) DO UPDATE SET
+                  title = excluded.title,
+                  pattern_type = excluded.pattern_type,
+                  summary = excluded.summary,
+                  example_json = excluded.example_json,
+                  source_task_ids_json = excluded.source_task_ids_json,
+                  similarity_score = excluded.similarity_score,
+                  dedupe_status = excluded.dedupe_status,
+                  updated_at = excluded.updated_at,
+                  payload_json = excluded.payload_json
+                """,
+                row,
+            )
+        return self.get_workflow_inbox_item(inbox_id) or row
+
+    def get_workflow_inbox_item(self, inbox_id: str) -> dict[str, Any] | None:
+        row = self.conn.execute("SELECT * FROM workflow_inbox_items WHERE id = ?", (inbox_id,)).fetchone()
+        return row_to_dict(row)
+
+    def list_workflow_inbox_items(self, *, review_status: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if review_status:
+            rows = self.conn.execute(
+                """
+                SELECT *
+                FROM workflow_inbox_items
+                WHERE review_status = ?
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (review_status, limit),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM workflow_inbox_items ORDER BY created_at ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return rows_to_dicts(rows)
+
+    def update_workflow_inbox_item(self, inbox_id: str, updates: dict[str, Any], *, now_iso: str) -> dict[str, Any] | None:
+        allowed = {"review_status", "dedupe_status", "similarity_score", "payload_json"}
+        fields = {key: value for key, value in updates.items() if key in allowed}
+        if not fields:
+            return self.get_workflow_inbox_item(inbox_id)
+        fields["updated_at"] = now_iso
+        assignments = []
+        values: list[Any] = []
+        for key, value in fields.items():
+            assignments.append(f"{key} = ?")
+            if key == "payload_json":
+                values.append(json.dumps(value or {}, ensure_ascii=False))
+            else:
+                values.append(value)
+        values.append(inbox_id)
+        with self.transaction():
+            self.conn.execute(
+                f"UPDATE workflow_inbox_items SET {', '.join(assignments)} WHERE id = ?",
+                values,
+            )
+        return self.get_workflow_inbox_item(inbox_id)
 
     def upsert_team_member(self, member: dict[str, Any]) -> dict[str, Any]:
         version_raw = member.get("version", 1)

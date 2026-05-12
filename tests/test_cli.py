@@ -53,6 +53,46 @@ def test_cli_init_prompts_for_eboss_key(tmp_path, monkeypatch, capsys):
     assert (config_path.parent / "secrets" / "eboss-api-key.txt").read_text(encoding="utf-8") == "prompted-key"
 
 
+def test_cli_init_no_first_run_bootstraps_only(tmp_path, monkeypatch, capsys):
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setattr("salesbrain.cli.sys.stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("salesbrain.cli.getpass.getpass", lambda prompt: "prompted-key")
+    monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
+    monkeypatch.setattr(
+        "salesbrain.cli.SalesBrainService.first_run",
+        lambda self, *args, **kwargs: (_ for _ in ()).throw(AssertionError("first_run should not be called")),
+    )
+
+    assert main(["init", "--config", str(config_path), "--sales-name", "Alice", "--no-first-run"]) == 0
+    output = capsys.readouterr().out
+    assert "first_run_skipped" in output
+    assert "scheduler_jobs" in output
+
+
+def test_cli_first_run_commands_are_available(tmp_path, monkeypatch, capsys):
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
+    monkeypatch.setattr(
+        "salesbrain.cli.SalesBrainService.inspect_openclaw_cron",
+        lambda self: {"ok": True, "business_candidate_count": 0, "business_cron_candidates": []},
+    )
+    monkeypatch.setattr(
+        "salesbrain.cli.SalesBrainService.complete_first_cron_migration",
+        lambda self, *args, **kwargs: {"ok": True, "skipped": True},
+    )
+    monkeypatch.setattr(
+        "salesbrain.cli.SalesBrainService.complete_initial_analysis",
+        lambda self, *args, **kwargs: {"ok": True, "analysis_report": {"formatted_report": "首次分析报告"}},
+    )
+
+    assert main(["--config", str(config_path), "first-run", "cron-inspect"]) == 0
+    assert "business_candidate_count" in capsys.readouterr().out
+    assert main(["--config", str(config_path), "first-run", "cron-migrate", "--mode", "none"]) == 0
+    assert "skipped" in capsys.readouterr().out
+    assert main(["--config", str(config_path), "first-run", "analyze"]) == 0
+    assert "首次分析报告" in capsys.readouterr().out
+
+
 def test_cli_monitor_command(tmp_path, monkeypatch, capsys):
     config_path = tmp_path / "config.toml"
     monkeypatch.setattr("salesbrain.cli.sys.stdin", SimpleNamespace(isatty=lambda: True))

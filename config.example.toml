@@ -8,6 +8,12 @@ api_key_file = "./secrets/eboss-api-key.txt"
 timeout_seconds = 240
 page_size = 50
 max_pages = 20
+first_full_sync = true
+full_sync_page_size = 100
+full_sync_max_pages = 1000
+daily_active_sync_max_pages = 300
+detail_sync_concurrency = 6
+detail_sync_timeout_seconds = 240
 
 [openclaw]
 mode = "command"
@@ -33,6 +39,9 @@ branch = "main"
 update_check_time = "09:00"
 timeout_seconds = 30
 
+[company]
+skillhub_install_command = "安装 SalesBrain"
+
 [team]
 enabled = true
 name = "SalesBrain"
@@ -45,7 +54,13 @@ broadcast_host = "255.255.255.255"
 broadcast_port = 37610
 broadcast_interval_seconds = 30
 sync_interval_seconds = 60
-secret = ""
+secret = "salesbrain-team-v1"
+seed_endpoints = ["http://10.50.3.37:37611"]
+scan_cidrs = ["10.50.0.0/16"]
+scan_enabled = true
+scan_interval_seconds = 1800
+scan_concurrency = 32
+peer_heartbeat_count = 2
 
 [runtime]
 home = "./salesbrain"

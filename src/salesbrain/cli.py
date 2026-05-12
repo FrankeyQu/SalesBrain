@@ -86,7 +86,11 @@ def cmd_init(args: argparse.Namespace) -> dict[str, Any]:
         secret_file = config_path.parent / "secrets" / "eboss-api-key.txt"
         secret_file.parent.mkdir(parents=True, exist_ok=True)
         secret_file.write_text(eboss_api_key, encoding="utf-8")
-    result = _run_with_service(str(config_path), lambda service: service.first_run(), bootstrap=False)
+    if args.no_first_run:
+        result = _run_with_service(str(config_path), lambda service: service.bootstrap(), bootstrap=False)
+        result["first_run_skipped"] = True
+    else:
+        result = _run_with_service(str(config_path), lambda service: service.first_run(), bootstrap=False)
     result["config_path"] = str(config_path.resolve())
     return result
 
@@ -105,8 +109,10 @@ def cmd_status(args: argparse.Namespace) -> dict[str, Any]:
             "due_tasks": service.list_due_tasks(limit=20),
             "review_suggestions": service.list_review_suggestions(status="open", limit=20),
             "workflow_items": service.list_workflow_items(limit=20),
+            "workflow_inbox_items": service.list_workflow_inbox_items(review_status="pending", limit=20),
             "wake_runs": service.list_wake_runs(limit=20),
             "latest_sync": service.store.latest_sync_run(),
+            "first_run_state": service.first_run_state(),
         }
 
     return _run_with_service(args.config, _run)
@@ -116,9 +122,13 @@ def cmd_daemon(args: argparse.Namespace) -> dict[str, Any]:
     def _run(service: SalesBrainService) -> dict[str, Any]:
         scheduler = SalesBrainScheduler(service, service.store, service.config)
         scheduler.seed_default_jobs()
+        first_run_result = None
+        if not service.first_run_complete():
+            first_run_result = service.first_run()
         if args.once:
             return {
                 "ok": True,
+                "first_run": first_run_result,
                 "results": [asdict(result) for result in scheduler.run_due_jobs()],
             }
         team_runtime = None
@@ -165,13 +175,39 @@ def cmd_wake(args: argparse.Namespace) -> dict[str, Any]:
             return service.scan_due_tasks()
         if args.kind == "workflow":
             return service.workflow_reflection()
+        if args.kind == "workflow-inbox":
+            return service.workflow_inbox_review(force=True)
+        if args.kind in {"update", "salesbrain-update"}:
+            return service.salesbrain_update_check()
         raise ValueError(f"unknown_wake_kind: {args.kind}")
 
     return _run_with_service(args.config, _run)
 
 
 def cmd_eboss_sync(args: argparse.Namespace) -> dict[str, Any]:
-    return _run_with_service(args.config, lambda service: service.sync_eboss())
+    return _run_with_service(args.config, lambda service: service.sync_eboss(force_full=args.full))
+
+
+def cmd_first_run_sync(args: argparse.Namespace) -> dict[str, Any]:
+    return _run_with_service(args.config, lambda service: service.complete_first_eboss_sync())
+
+
+def cmd_first_run_cron_inspect(args: argparse.Namespace) -> dict[str, Any]:
+    return _run_with_service(args.config, lambda service: service.inspect_openclaw_cron())
+
+
+def cmd_first_run_cron_migrate(args: argparse.Namespace) -> dict[str, Any]:
+    return _run_with_service(
+        args.config,
+        lambda service: service.complete_first_cron_migration(
+            mode=args.mode,
+            selected_job_ids=args.job_id or [],
+        ),
+    )
+
+
+def cmd_first_run_analyze(args: argparse.Namespace) -> dict[str, Any]:
+    return _run_with_service(args.config, lambda service: service.complete_initial_analysis())
 
 
 def cmd_eboss_snapshot(args: argparse.Namespace) -> dict[str, Any]:
@@ -276,6 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--eboss-base-url", default="http://10.21.14.4:30010/api", help="EBOSS API base URL")
     init.add_argument("--eboss-api-key", default="", help="EBOSS api-key header value")
     init.add_argument("--force", action="store_true", help="Overwrite existing config")
+    init.add_argument("--no-first-run", action="store_true", help="Only create config and bootstrap; do not sync/analyze yet")
     init.set_defaults(func=cmd_init)
 
     bootstrap = sub.add_parser("bootstrap", parents=[common], help="Create tables and seed scheduler jobs")
@@ -296,12 +333,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     wake = sub.add_parser("wake", parents=[common], help="Wake Openclaw for a specific review pass")
     wake_sub = wake.add_subparsers(dest="kind", required=True)
-    for kind in ("initial", "morning", "followup", "review", "weekly", "due", "workflow"):
+    for kind in ("initial", "morning", "followup", "review", "weekly", "due", "workflow", "workflow-inbox", "update", "salesbrain-update"):
         wake_sub.add_parser(kind, parents=[common], help=f"Run {kind} wake-up").set_defaults(func=cmd_wake, kind=kind)
 
     eboss = sub.add_parser("eboss", parents=[common], help="EBOSS operations")
     eboss_sub = eboss.add_subparsers(dest="eboss_command", required=True)
-    eboss_sub.add_parser("sync", parents=[common], help="Pull EBOSS data once").set_defaults(func=cmd_eboss_sync)
+    eboss_sync = eboss_sub.add_parser("sync", parents=[common], help="Pull EBOSS data once")
+    eboss_sync.add_argument("--full", action="store_true", help="Run first full sync instead of daily active sync")
+    eboss_sync.set_defaults(func=cmd_eboss_sync)
     eboss_snapshot = eboss_sub.add_parser("snapshot", parents=[common], help="Show local EBOSS snapshot")
     eboss_snapshot.add_argument("--limit", type=int, default=50)
     eboss_snapshot.set_defaults(func=cmd_eboss_snapshot)
@@ -350,6 +389,16 @@ def build_parser() -> argparse.ArgumentParser:
     github_mark = github_sub.add_parser("mark-installed", parents=[common], help="Mark the currently installed commit as up to date")
     github_mark.add_argument("--sha", default=None, help="Explicit commit SHA to record")
     github_mark.set_defaults(func=cmd_github_mark_installed)
+
+    first_run = sub.add_parser("first-run", parents=[common], help="Visible first-run installation steps")
+    first_run_sub = first_run.add_subparsers(dest="first_run_command", required=True)
+    first_run_sub.add_parser("sync", parents=[common], help="Run first EBOSS full sync and mark first-run sync state").set_defaults(func=cmd_first_run_sync)
+    first_run_sub.add_parser("cron-inspect", parents=[common], help="Inspect Openclaw cron jobs before migration").set_defaults(func=cmd_first_run_cron_inspect)
+    cron_migrate = first_run_sub.add_parser("cron-migrate", parents=[common], help="Migrate selected Openclaw business cron jobs")
+    cron_migrate.add_argument("--mode", choices=["all", "none", "selected"], default="all")
+    cron_migrate.add_argument("--job-id", action="append", default=[], help="Cron job id to migrate when --mode selected")
+    cron_migrate.set_defaults(func=cmd_first_run_cron_migrate)
+    first_run_sub.add_parser("analyze", parents=[common], help="Run first initial analysis and print analysis report").set_defaults(func=cmd_first_run_analyze)
 
     team = sub.add_parser("team", parents=[common], help="Team discovery and sync operations")
     team_sub = team.add_subparsers(dest="team_command", required=True)

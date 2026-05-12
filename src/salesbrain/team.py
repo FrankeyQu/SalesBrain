@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import hmac
 import hashlib
+import ipaddress
 import json
+import random
 import socket
 import threading
 import time
 import uuid
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -20,6 +23,7 @@ from .timeutil import iso_now
 
 NODE_ID_STATE_KEY = "team_node_id"
 TEAM_MESSAGE_TYPE = "salesbrain.team.v1"
+TEAM_LAST_SCAN_AT_KEY = "team_last_scan_at_monotonic"
 
 
 def _loads(value: Any, default: Any) -> Any:
@@ -89,6 +93,20 @@ def _workflow_payload(row: dict[str, Any]) -> dict[str, Any]:
         "created_at": item["created_at"],
         "updated_at": item["updated_at"],
     }
+
+
+def _with_member_source(member: dict[str, Any], *, source: str, source_endpoint: str | None = None) -> dict[str, Any]:
+    row = dict(member)
+    payload = row.get("payload_json")
+    if not isinstance(payload, dict):
+        payload = _loads(payload, {})
+    if not isinstance(payload, dict):
+        payload = {}
+    payload["source"] = source
+    if source_endpoint:
+        payload["source_endpoint"] = source_endpoint
+    row["payload_json"] = payload
+    return row
 
 
 @dataclass(slots=True)
@@ -164,22 +182,31 @@ class TeamService:
             "payload_json": payload,
         }
 
-    def record_event(self, event: dict[str, Any]) -> bool:
+    def record_event(self, event: dict[str, Any], *, source: str = "peer", source_endpoint: str | None = None) -> bool:
         inserted = self.store.insert_team_sync_event(event)
         if inserted:
-            self.apply_event_payload(event)
+            self.apply_event_payload(event, source=source, source_endpoint=source_endpoint)
         return inserted
 
-    def apply_event_payload(self, event: dict[str, Any]) -> None:
+    def apply_event_payload(self, event: dict[str, Any], *, source: str = "peer", source_endpoint: str | None = None) -> None:
         payload = event.get("payload_json") or {}
         if str(event.get("entity_type")) == "team_member":
             member = payload.get("member") if isinstance(payload, dict) else None
             if isinstance(member, dict):
-                self.store.upsert_team_member(member)
+                self.store.upsert_team_member(_with_member_source(member, source=source, source_endpoint=source_endpoint))
         elif str(event.get("entity_type")) == "workflow_item":
             item = payload.get("workflow_item") if isinstance(payload, dict) else None
             if isinstance(item, dict):
-                self.store.upsert_workflow_item(item)
+                self.store.upsert_workflow_inbox_item(
+                    {
+                        **item,
+                        "id": str(event.get("event_id") or item.get("id") or uuid.uuid4().hex),
+                        "source_node_id": event.get("origin_node_id"),
+                        "source_event_id": event.get("event_id"),
+                        "now_iso": iso_now(self.config.timezone),
+                        "payload_json": {"team_event": event},
+                    }
+                )
 
     def announce_self(self, *, status: str = "online") -> dict[str, Any]:
         member = self.local_member(status=status)
@@ -232,14 +259,20 @@ class TeamService:
             for row in self.store.list_team_sync_events(team_name=self.config.team_name, limit=limit)
         ]
 
-    def import_events(self, events: list[dict[str, Any]]) -> int:
+    def import_events(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        source: str = "peer",
+        source_endpoint: str | None = None,
+    ) -> int:
         imported = 0
         for event in events:
             if not isinstance(event, dict):
                 continue
             if str(event.get("team_name")) != self.config.team_name:
                 continue
-            if self.record_event(event):
+            if self.record_event(event, source=source, source_endpoint=source_endpoint):
                 imported += 1
         return imported
 
@@ -287,6 +320,7 @@ class TeamService:
             return False
         if str(member.get("node_id")) == self.node_id():
             return False
+        member = _with_member_source(member, source="broadcast")
         self.store.upsert_team_member(member)
         event = self.build_event(
             event_type="upsert",
@@ -305,7 +339,7 @@ class TeamService:
         self.store.insert_team_sync_event(event)
         return True
 
-    def sync_with_endpoint(self, endpoint: str, *, limit: int = 200) -> TeamSyncResult:
+    def sync_with_endpoint(self, endpoint: str, *, limit: int = 200, source: str = "peer") -> TeamSyncResult:
         base = endpoint.rstrip("/")
         errors: list[str] = []
         pulled = 0
@@ -317,7 +351,7 @@ class TeamService:
                 payload = json.loads(resp.read().decode("utf-8", errors="replace") or "{}")
             events = payload.get("events") if isinstance(payload, dict) else []
             if isinstance(events, list):
-                pulled = self.import_events(events)
+                pulled = self.import_events(events, source=source, source_endpoint=base)
         except Exception as exc:
             errors.append(f"pull_failed: {exc}")
 
@@ -338,14 +372,101 @@ class TeamService:
 
         return TeamSyncResult(endpoint=endpoint, pulled=pulled, pushed=pushed, errors=errors)
 
-    def sync_known_peers(self, *, limit: int = 200) -> list[TeamSyncResult]:
-        results: list[TeamSyncResult] = []
-        self.publish_workflow_items(limit=limit)
+    def _peer_endpoints(self) -> list[str]:
+        endpoints = []
         for peer in self.peers():
-            endpoint = str(peer.get("endpoint") or "")
+            endpoint = str(peer.get("endpoint") or "").rstrip("/")
             if not endpoint or str(peer.get("node_id")) == self.node_id():
                 continue
-            results.append(self.sync_with_endpoint(endpoint, limit=limit))
+            if str(peer.get("status") or "unknown") == "offline":
+                continue
+            endpoints.append(endpoint)
+        return sorted(set(endpoints))
+
+    def _seed_endpoints(self) -> list[str]:
+        local = self.endpoint().rstrip("/")
+        return sorted({endpoint.rstrip("/") for endpoint in self.config.team_seed_endpoints if endpoint and endpoint.rstrip("/") != local})
+
+    def _endpoint_health_ok(self, endpoint: str, *, timeout: float = 0.75) -> bool:
+        try:
+            req = urllib.request.Request(f"{endpoint.rstrip('/')}/health", method="GET", headers=self._headers())
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return 200 <= int(resp.status) < 300
+        except Exception:
+            return False
+
+    def _scan_due(self) -> bool:
+        raw = self.store.get_state(TEAM_LAST_SCAN_AT_KEY)
+        try:
+            last_scan = float(raw or "0")
+        except ValueError:
+            last_scan = 0.0
+        return time.monotonic() - last_scan >= max(60, self.config.team_scan_interval_seconds)
+
+    def scan_networks(self, *, limit: int = 200) -> list[TeamSyncResult]:
+        if not self.config.team_scan_enabled:
+            return []
+        now_iso = iso_now(self.config.timezone)
+        self.store.set_state(TEAM_LAST_SCAN_AT_KEY, str(time.monotonic()), now_iso=now_iso)
+        endpoints: list[str] = []
+        port = self.config.team_http_port
+        for cidr in self.config.team_scan_cidrs:
+            try:
+                network = ipaddress.ip_network(cidr, strict=False)
+            except ValueError:
+                continue
+            endpoints.extend(f"http://{host}:{port}" for host in network.hosts())
+        local = self.endpoint().rstrip("/")
+        known = set(self._peer_endpoints()) | set(self._seed_endpoints()) | {local}
+        candidates = [endpoint for endpoint in endpoints if endpoint not in known]
+        results: list[TeamSyncResult] = []
+        if not candidates:
+            return results
+        with ThreadPoolExecutor(max_workers=max(1, self.config.team_scan_concurrency)) as pool:
+            future_map = {
+                pool.submit(self._endpoint_health_ok, endpoint, timeout=0.35): endpoint
+                for endpoint in candidates
+            }
+            for future in as_completed(future_map):
+                endpoint = future_map[future]
+                try:
+                    ok = future.result()
+                except Exception:
+                    ok = False
+                if not ok:
+                    continue
+                result = self.sync_with_endpoint(endpoint, limit=limit, source="scan")
+                results.append(result)
+        return results
+
+    def sync_known_peers(self, *, limit: int = 200) -> list[TeamSyncResult]:
+        results: list[TeamSyncResult] = []
+        self.announce_self(status="online")
+        self.publish_workflow_items(limit=limit)
+        seed_results = [
+            self.sync_with_endpoint(endpoint, limit=limit, source="seed")
+            for endpoint in self._seed_endpoints()
+        ]
+        results.extend(seed_results)
+
+        peer_endpoints = self._peer_endpoints()
+        if peer_endpoints:
+            sample_size = max(1, min(self.config.team_peer_heartbeat_count, len(peer_endpoints)))
+            peer_results: list[TeamSyncResult] = []
+            for endpoint in random.sample(peer_endpoints, sample_size):
+                result = self.sync_with_endpoint(endpoint, limit=limit, source="peer")
+                peer_results.append(result)
+                results.append(result)
+            if any(not result.errors for result in peer_results):
+                return results
+
+        try:
+            self.broadcast_hello(status="online")
+        except Exception as exc:
+            results.append(TeamSyncResult(endpoint="broadcast", pulled=0, pushed=0, errors=[f"broadcast_failed: {exc}"]))
+
+        if not self._peer_endpoints() and self._scan_due():
+            results.extend(self.scan_networks(limit=limit))
         return results
 
     def _headers(self) -> dict[str, str]:
@@ -361,6 +482,21 @@ class TeamService:
                 self.config.team_secret,
             )
         return headers
+
+    def format_member(self, member: dict[str, Any]) -> str:
+        payload = _loads(member.get("payload_json"), {})
+        source = payload.get("source") if isinstance(payload, dict) else ""
+        return "\n".join(
+            [
+                f"姓名：{member.get('real_name') or ''}",
+                f"角色：{member.get('role') or ''}",
+                f"节点：{member.get('node_id') or ''}",
+                f"地址：{member.get('endpoint') or ''}",
+                f"状态：{member.get('status') or ''}",
+                f"最后在线：{member.get('last_seen_at') or ''}",
+                f"来源：{source or 'unknown'}",
+            ]
+        )
 
 
 class TeamHTTPServer:
@@ -397,7 +533,7 @@ class TeamHTTPServer:
                 body = self.rfile.read(length).decode("utf-8", errors="replace") if length else "{}"
                 payload = json.loads(body or "{}")
                 events = payload.get("events") if isinstance(payload, dict) else []
-                imported = team_service.import_events(events if isinstance(events, list) else [])
+                imported = team_service.import_events(events if isinstance(events, list) else [], source="peer")
                 self._write({"ok": True, "imported": imported})
 
             def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
@@ -485,10 +621,7 @@ class TeamRuntime:
             while not self._stopped.is_set():
                 now = time.monotonic()
                 if now >= next_hello_at:
-                    try:
-                        self.service.broadcast_hello(status="online")
-                    except Exception:
-                        pass
+                    self.service.announce_self(status="online")
                     next_hello_at = now + max(5, self.service.config.team_broadcast_interval_seconds)
                 if now >= next_sync_at:
                     try:

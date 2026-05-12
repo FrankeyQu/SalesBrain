@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import time
+from datetime import timedelta
 from dataclasses import asdict, dataclass
 from typing import Any
 
 from .config import SalesBrainConfig
 from .db import SalesBrainStore
-from .timeutil import iso_now, next_daily_run, next_interval_run, next_weekly_run, now_in_zone
+from .timeutil import iso_now, next_daily_run, next_interval_run, next_weekly_run, now_in_zone, parse_iso_datetime
 
 
 DEFAULT_JOB_SPECS = [
@@ -65,10 +66,16 @@ DEFAULT_JOB_SPECS = [
         "schedule_value": "fri 17:30",
     },
     {
-        "job_name": "github_update_check",
-        "handler_name": "github_update_check",
+        "job_name": "salesbrain_update_check",
+        "handler_name": "salesbrain_update_check",
         "schedule_kind": "daily_time",
         "schedule_value": "09:00",
+    },
+    {
+        "job_name": "workflow_inbox_review",
+        "handler_name": "workflow_inbox_review",
+        "schedule_kind": "interval_minutes",
+        "schedule_value": "5",
     },
 ]
 
@@ -105,6 +112,7 @@ def job_specs_from_config(config: SalesBrainConfig) -> list[dict[str, str]]:
         {**DEFAULT_JOB_SPECS[7], "schedule_value": config.workflow_reflection_time},
         {**DEFAULT_JOB_SPECS[8], "schedule_value": config.weekly_summary_time},
         {**DEFAULT_JOB_SPECS[9], "schedule_value": config.github_update_check_time},
+        DEFAULT_JOB_SPECS[10],
     ]
 
 
@@ -115,7 +123,23 @@ def compute_next_run(now, schedule_kind: str, schedule_value: str):
         return next_interval_run(now, int(schedule_value))
     if schedule_kind == "weekly_day_time":
         return next_weekly_run(now, schedule_value)
+    if schedule_kind == "one_shot_at":
+        return parse_iso_datetime(schedule_value)
     raise ValueError(f"unsupported_schedule_kind: {schedule_kind}")
+
+
+def _loads_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    import json
+
+    try:
+        parsed = json.loads(str(value))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 @dataclass(slots=True)
@@ -196,7 +220,10 @@ class SalesBrainScheduler:
             try:
                 handler_name = str(job["handler_name"])
                 handler = getattr(self.service, handler_name)
-                detail = handler(now=now)
+                if handler_name == "planned_wake":
+                    detail = handler(now=now, scheduler_job=job)
+                else:
+                    detail = handler(now=now)
                 status = "success"
                 if not isinstance(detail, dict):
                     status = "failed"
@@ -212,7 +239,14 @@ class SalesBrainScheduler:
                 status = "failed"
             finished_at = now_in_zone(self.config.timezone).isoformat(timespec="seconds")
             duration_seconds = round(max(0.0, time.perf_counter() - started_perf), 3)
-            next_run = compute_next_run(now, str(job["schedule_kind"]), str(job["schedule_value"]))
+            schedule_kind = str(job["schedule_kind"])
+            schedule_value = str(job["schedule_value"])
+            if schedule_kind == "one_shot_at" and status != "success":
+                payload = _loads_dict(job.get("payload_json"))
+                retry_minutes = int(payload.get("retry_minutes") or 5)
+                next_run = now + timedelta(minutes=max(1, retry_minutes))
+            else:
+                next_run = compute_next_run(now, schedule_kind, schedule_value)
             self.store.update_scheduler_job_run(
                 str(job["job_name"]),
                 last_run_at=finished_at,
@@ -222,6 +256,15 @@ class SalesBrainScheduler:
                     "detail": detail,
                 },
             )
+            if schedule_kind == "one_shot_at" and status == "success":
+                payload = _loads_dict(job.get("payload_json"))
+                payload.update(
+                    {
+                        "completed_at": finished_at,
+                        "auto_disabled": True,
+                    }
+                )
+                self.store.set_scheduler_job_enabled(str(job["job_name"]), False, payload_json=payload)
             self.store.record_scheduler_job_run(
                 job_name=str(job["job_name"]),
                 handler_name=handler_name,
@@ -233,8 +276,8 @@ class SalesBrainScheduler:
                 detail_json=detail if isinstance(detail, dict) else {"raw": detail},
                 payload_json={
                     "scheduled_next_run_at": str(job.get("next_run_at", "")),
-                    "schedule_kind": str(job.get("schedule_kind", "")),
-                    "schedule_value": str(job.get("schedule_value", "")),
+                    "schedule_kind": schedule_kind,
+                    "schedule_value": schedule_value,
                 },
             )
             results.append(

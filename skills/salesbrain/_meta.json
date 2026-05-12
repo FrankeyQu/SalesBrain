@@ -1,0 +1,15 @@
+{
+  "name": "SalesBrain",
+  "slug": "salesbrain",
+  "version": "0.2.0",
+  "description": "SalesBrain 是给销售团队使用的 Openclaw 陪跑导师 Skill。",
+  "install": {
+    "entry": "scripts/install.py",
+    "steps_command": "python <skill_root>/scripts/install.py --steps",
+    "check_command": "python <skill_root>/scripts/install.py --check"
+  },
+  "github": {
+    "repo": "https://github.com/FrankeyQu/SalesBrain.git",
+    "branch": "main"
+  }
+}

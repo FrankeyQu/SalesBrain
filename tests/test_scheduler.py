@@ -44,6 +44,7 @@ def test_compute_next_run_for_daily_and_interval():
     assert compute_next_run(fixed_now, "daily_time", "07:00").isoformat(timespec="seconds") == "2026-05-11T07:00:00+08:00"
     assert compute_next_run(fixed_now, "daily_time", "05:00").isoformat(timespec="seconds") == "2026-05-12T05:00:00+08:00"
     assert compute_next_run(fixed_now, "interval_minutes", "5").isoformat(timespec="seconds") == "2026-05-11T06:05:00+08:00"
+    assert compute_next_run(fixed_now, "one_shot_at", "2026-05-11T09:30:00+08:00").isoformat(timespec="seconds") == "2026-05-11T09:30:00+08:00"
 
 
 def test_compute_next_run_for_weekly():
@@ -66,7 +67,12 @@ def test_scheduler_seeds_followup_review_and_weekly_jobs(tmp_path):
     assert "work_followup_1930" in jobs
     assert "daily_report_review" in jobs
     assert "weekly_summary" in jobs
+    assert "salesbrain_update_check" in jobs
+    assert "workflow_inbox_review" in jobs
+    assert jobs["salesbrain_update_check"]["handler_name"] == "salesbrain_update_check"
     assert jobs["weekly_summary"]["schedule_kind"] == "weekly_day_time"
+    assert jobs["workflow_inbox_review"]["schedule_kind"] == "interval_minutes"
+    assert jobs["workflow_inbox_review"]["schedule_value"] == "5"
 
 
 def test_seed_default_jobs_preserves_existing_next_run(tmp_path):

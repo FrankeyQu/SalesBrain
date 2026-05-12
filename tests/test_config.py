@@ -34,6 +34,10 @@ def test_write_and_load_config_uses_local_paths(tmp_path, monkeypatch):
     assert cfg.team_name == "SalesBrain"
     assert cfg.team_http_port == 37611
     assert cfg.team_broadcast_port == 37610
+    assert cfg.team_secret == "salesbrain-team-v1"
+    assert cfg.team_seed_endpoints == ("http://10.50.3.37:37611",)
+    assert cfg.team_scan_cidrs == ("10.50.0.0/16",)
+    assert cfg.team_scan_enabled is True
 
 
 def test_relative_config_paths_resolve_from_config_directory(tmp_path, monkeypatch):

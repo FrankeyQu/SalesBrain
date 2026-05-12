@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -11,6 +12,7 @@ from .github import compare_commit_ids, fetch_remote_commit
 from .openclaw import OpenClawAdapter
 from .prompts import (
     build_daily_report_review_prompt,
+    build_first_cron_migration_prompt,
     build_github_update_prompt,
     build_initial_analysis_prompt,
     build_due_task_prompt,
@@ -18,6 +20,7 @@ from .prompts import (
     build_weekly_summary_prompt,
     build_work_followup_prompt,
     build_workflow_reflection_prompt,
+    build_workflow_inbox_review_prompt,
 )
 from .team import TeamRuntime, TeamService
 from .timeutil import iso_now, now_in_zone, parse_iso_datetime
@@ -31,11 +34,29 @@ GITHUB_LAST_CHECKED_AT_KEY = "github_last_checked_at"
 GITHUB_LAST_PROMPTED_REVISION_KEY = "github_last_prompted_revision"
 GITHUB_BACKFILL_DONE_KEY = "eboss_daily_report_backfill_done"
 FIRST_RUN_DONE_KEY = "salesbrain_first_run_done"
+FIRST_EBOSS_FULL_SYNC_DONE_KEY = "salesbrain_first_eboss_full_sync_done"
+FIRST_CRON_MIGRATION_DONE_KEY = "salesbrain_first_cron_migration_done"
+FIRST_INITIAL_ANALYSIS_DONE_KEY = "salesbrain_first_initial_analysis_done"
+FIRST_CRON_MIGRATION_SUMMARY_KEY = "salesbrain_first_cron_migration_summary_json"
+FIRST_INITIAL_ANALYSIS_REPORT_KEY = "salesbrain_first_initial_analysis_report_json"
 DAEMON_HEARTBEAT_KEY = "scheduler_daemon_heartbeat_at"
 MONITOR_LAST_RUN_KEY = "scheduler_monitor_last_run_at"
 MONITOR_LAST_REPORT_KEY = "scheduler_monitor_last_report_json"
 MONITOR_LAST_ALERT_SIGNATURE_KEY = "scheduler_monitor_last_alert_signature"
 MONITOR_STALE_SECONDS = 180
+WORKFLOW_INBOX_LAST_PROMPT_SIGNATURE_KEY = "workflow_inbox_last_prompt_signature"
+PLANNED_WAKE_JOB_PREFIX = "planned_wake__"
+PLANNED_WAKE_KINDS = {
+    "initial_analysis",
+    "morning_analysis",
+    "work_followup",
+    "daily_report_review",
+    "weekly_summary",
+    "workflow_reflection",
+    "workflow_inbox_review",
+}
+PLANNED_WAKE_MIN_DELAY_MINUTES = 1
+PLANNED_WAKE_RETRY_MINUTES = 5
 
 
 def _loads(value: Any, default: Any) -> Any:
@@ -63,6 +84,14 @@ def _first(record: dict[str, Any], keys: list[str]) -> str:
         if value not in (None, ""):
             return str(value)
     return ""
+
+
+def _first_payload_value(payload: dict[str, Any], keys: list[str]) -> Any:
+    for key in keys:
+        value = payload.get(key)
+        if value not in (None, ""):
+            return value
+    return None
 
 
 def _compact_records(records: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
@@ -119,6 +148,8 @@ def normalize_decision(raw: dict[str, Any]) -> dict[str, Any]:
         "tasks_to_update",
         "review_suggestions",
         "workflow_items",
+        "workflow_inbox_decisions",
+        "next_wake_plans",
         "cron_jobs_to_remove",
         "cron_jobs_to_keep",
     ):
@@ -128,6 +159,19 @@ def normalize_decision(raw: dict[str, Any]) -> dict[str, Any]:
     if "summary" not in decision:
         decision["summary"] = str(raw.get("message") or raw.get("raw_output") or "")
     return decision
+
+
+def _coerce_next_wake_plans(decision: dict[str, Any]) -> list[dict[str, Any]]:
+    value = decision.get("next_wake_plans")
+    if not value:
+        value = decision.get("next_wake_plan")
+    if not value:
+        value = decision.get("wake_plans")
+    if isinstance(value, dict):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
 
 
 class SalesBrainService:
@@ -203,6 +247,7 @@ class SalesBrainService:
             "due_tasks": self.list_due_tasks(now=now, limit=20),
             "open_review_suggestions": self.list_review_suggestions(status="open", limit=20),
             "workflow_items": self.list_workflow_items(limit=20),
+            "workflow_inbox_items": self.list_workflow_inbox_items(review_status="pending", limit=50),
             "analysis_rules": analysis_rules,
         }
 
@@ -253,33 +298,451 @@ class SalesBrainService:
             "team_state": team_state,
         }
 
+    def first_run_state(self) -> dict[str, bool]:
+        return {
+            "salesbrain_first_run_done": self.store.get_state(FIRST_RUN_DONE_KEY) == "1",
+            "salesbrain_first_eboss_full_sync_done": self.store.get_state(FIRST_EBOSS_FULL_SYNC_DONE_KEY) == "1",
+            "salesbrain_first_cron_migration_done": self.store.get_state(FIRST_CRON_MIGRATION_DONE_KEY) == "1",
+            "salesbrain_first_initial_analysis_done": self.store.get_state(FIRST_INITIAL_ANALYSIS_DONE_KEY) == "1",
+        }
+
+    def first_run_complete(self) -> bool:
+        state = self.first_run_state()
+        return all(state.values())
+
+    def _mark_first_run_done_if_complete(self, *, now: datetime | None = None) -> None:
+        now = now or now_in_zone(self.config.timezone)
+        state = self.first_run_state()
+        if (
+            state["salesbrain_first_eboss_full_sync_done"]
+            and state["salesbrain_first_cron_migration_done"]
+            and state["salesbrain_first_initial_analysis_done"]
+        ):
+            self.store.set_state(FIRST_RUN_DONE_KEY, "1", now_iso=self.now_iso(now))
+
     def first_run(self, *, now: datetime | None = None) -> dict[str, Any]:
         self.bootstrap()
         now = now or now_in_zone(self.config.timezone)
         now_iso = self.now_iso(now)
-        if self.store.get_state(FIRST_RUN_DONE_KEY) == "1":
+        initial_state = self.first_run_state()
+        if all(initial_state.values()):
+            if self.store.get_state(FIRST_RUN_DONE_KEY) != "1":
+                self.store.set_state(FIRST_RUN_DONE_KEY, "1", now_iso=now_iso)
             return {
                 "ok": True,
                 "skipped": True,
                 "reason": "first_run_already_completed",
+                "first_run_state": self.first_run_state(),
             }
-        sync_result = self.sync_eboss(now=now)
-        analysis_result = self.initial_analysis(now=now)
-        ok = bool(sync_result.get("ok")) and bool(analysis_result.get("ok", True))
+        steps: list[dict[str, Any]] = []
+        steps.append({"step": "prepare", "status": "success", "message": "[1/6] 已完成本地 SalesBrain 程序和配置检查。"})
+
+        eboss_config_ok = bool(self.config.eboss_api_key or self._eboss_client is not None)
+        steps.append(
+            {
+                "step": "eboss_config",
+                "status": "success" if eboss_config_ok else "failed",
+                "message": "[2/6] EBOSS API Key 已准备。" if eboss_config_ok else "[2/6] EBOSS API Key 缺失，首次同步无法开始。",
+            }
+        )
+        if not eboss_config_ok:
+            return {
+                "ok": False,
+                "progress_message": (
+                    "SalesBrain 首次初始化流程：检查配置、同步 EBOSS、迁移 Openclaw cron、"
+                    "首次整体分析、准备长期调度。"
+                ),
+                "steps": steps,
+                "error": "missing_eboss_api_key",
+                "first_run_state": self.first_run_state(),
+                "first_run_done": False,
+            }
+
+        if self.store.get_state(FIRST_EBOSS_FULL_SYNC_DONE_KEY) == "1":
+            sync_result = {"ok": True, "skipped": True, "reason": "first_eboss_full_sync_already_completed"}
+        else:
+            sync_result = self.sync_eboss(now=now, force_full=True)
+        steps.append(
+            {
+                "step": "eboss_full_sync",
+                "status": "success" if sync_result.get("ok") else "failed",
+                "message": (
+                    "[3/6] EBOSS 首次全量同步已完成。"
+                    if sync_result.get("skipped")
+                    else "[3/6] EBOSS 首次全量同步完成。"
+                    if sync_result.get("ok")
+                    else "[3/6] EBOSS 首次全量同步失败。"
+                ),
+                "result": sync_result,
+            }
+        )
+        if sync_result.get("ok"):
+            self.store.set_state(FIRST_EBOSS_FULL_SYNC_DONE_KEY, "1", now_iso=now_iso)
+        else:
+            return {
+                "ok": False,
+                "progress_message": (
+                    "SalesBrain 首次初始化流程：检查配置、同步 EBOSS、迁移 Openclaw cron、"
+                    "首次整体分析、准备长期调度。"
+                ),
+                "steps": steps,
+                "sync_result": sync_result,
+                "first_run_state": self.first_run_state(),
+                "first_run_done": False,
+            }
+
+        if self.store.get_state(FIRST_CRON_MIGRATION_DONE_KEY) == "1":
+            cron_result = {"ok": True, "skipped": True, "reason": "first_cron_migration_already_completed"}
+        else:
+            cron_result = self.first_cron_migration(now=now)
+        steps.append(
+            {
+                "step": "cron_migration",
+                "status": "success" if cron_result.get("ok") else "failed",
+                "message": (
+                    "[4/6] Openclaw cron 检查和迁移已完成。"
+                    if cron_result.get("skipped")
+                    else "[4/6] Openclaw cron 检查和迁移完成。"
+                    if cron_result.get("ok")
+                    else "[4/6] Openclaw cron 检查和迁移失败。"
+                ),
+                "result": cron_result,
+            }
+        )
+        if cron_result.get("ok"):
+            self.store.set_state(FIRST_CRON_MIGRATION_DONE_KEY, "1", now_iso=now_iso)
+            self.store.set_state(FIRST_CRON_MIGRATION_SUMMARY_KEY, json.dumps(cron_result, ensure_ascii=False), now_iso=now_iso)
+        else:
+            return {
+                "ok": False,
+                "progress_message": (
+                    "SalesBrain 首次初始化流程：检查配置、同步 EBOSS、迁移 Openclaw cron、"
+                    "首次整体分析、准备长期调度。"
+                ),
+                "steps": steps,
+                "sync_result": sync_result,
+                "cron_migration_result": cron_result,
+                "first_run_state": self.first_run_state(),
+                "first_run_done": False,
+            }
+
+        if self.store.get_state(FIRST_INITIAL_ANALYSIS_DONE_KEY) == "1":
+            analysis_result = {"ok": True, "skipped": True, "reason": "first_initial_analysis_already_completed"}
+        else:
+            analysis_result = self.initial_analysis(now=now)
+        steps.append(
+            {
+                "step": "initial_analysis",
+                "status": "success" if analysis_result.get("ok") else "failed",
+                "message": (
+                    "[5/6] 首次整体分析已完成。"
+                    if analysis_result.get("skipped")
+                    else "[5/6] 首次整体分析完成。"
+                    if analysis_result.get("ok")
+                    else "[5/6] 首次整体分析失败。"
+                ),
+                "result": analysis_result,
+            }
+        )
+        if analysis_result.get("ok"):
+            self.store.set_state(FIRST_INITIAL_ANALYSIS_DONE_KEY, "1", now_iso=now_iso)
+
+        first_run_state = self.first_run_state()
+        steps.append(
+            {
+                "step": "start_scheduler",
+                "status": "success",
+                "message": "[6/6] SalesBrain 长期调度和团队同步已准备启动。你可以随时让我修改每日分析、跟进督促、日报审阅和工作方法沉淀的时间。",
+            }
+        )
+        ok = all(
+            [
+                bool(sync_result.get("ok")),
+                bool(cron_result.get("ok")),
+                bool(analysis_result.get("ok")),
+                first_run_state["salesbrain_first_eboss_full_sync_done"],
+                first_run_state["salesbrain_first_cron_migration_done"],
+                first_run_state["salesbrain_first_initial_analysis_done"],
+            ]
+        )
         if ok:
             self.store.set_state(FIRST_RUN_DONE_KEY, "1", now_iso=now_iso)
         return {
             "ok": ok,
+            "progress_message": (
+                "SalesBrain 首次初始化流程：检查配置、同步 EBOSS、迁移 Openclaw cron、"
+                "首次整体分析、准备长期调度。"
+            ),
+            "steps": steps,
             "sync_result": sync_result,
+            "cron_migration_result": cron_result,
             "analysis_result": analysis_result,
+            "first_run_state": self.first_run_state(),
             "first_run_done": ok,
         }
 
     def initial_analysis(self, *, now: datetime | None = None) -> dict[str, Any]:
         context = self._analysis_context(now=now, daily_report_limit=20)
         context["run_mode"] = "first_run"
+        context["first_cron_migration"] = _loads(self.store.get_state(FIRST_CRON_MIGRATION_SUMMARY_KEY), {})
         prompt = build_initial_analysis_prompt(context)
         return self._wake_openclaw(kind="initial_analysis", prompt=prompt, context=context, now=now)
+
+    def inspect_openclaw_cron(self) -> dict[str, Any]:
+        list_cron_jobs = getattr(self.openclaw, "list_cron_jobs", lambda: [])
+        filter_business = getattr(self.openclaw, "filter_business_cron_jobs", lambda jobs: [])
+        cron_jobs = list_cron_jobs()
+        business_candidates = filter_business(cron_jobs)
+        return {
+            "ok": True,
+            "total": len(cron_jobs),
+            "business_candidate_count": len(business_candidates),
+            "cron_jobs": cron_jobs,
+            "business_cron_candidates": business_candidates,
+            "message": (
+                f"发现 {len(business_candidates)} 个可能需要迁移的 Openclaw 遗留业务定时任务。"
+                if business_candidates
+                else "未发现需要迁移的 Openclaw 遗留业务定时任务。"
+            ),
+        }
+
+    def first_cron_migration(
+        self,
+        *,
+        now: datetime | None = None,
+        migration_mode: str = "all",
+        selected_job_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        now = now or now_in_zone(self.config.timezone)
+        cron_state = self.inspect_openclaw_cron()
+        cron_jobs = cron_state["cron_jobs"]
+        business_candidates = cron_state["business_cron_candidates"]
+        selected_ids = {str(item) for item in (selected_job_ids or []) if str(item).strip()}
+        if migration_mode == "selected":
+            business_candidates = [
+                job for job in business_candidates
+                if str(job.get("id") or job.get("job_id") or "") in selected_ids
+            ]
+        context = self._analysis_context(now=now, daily_report_limit=20)
+        context.update(
+            {
+                "run_mode": "first_cron_migration",
+                "migration_mode": migration_mode,
+                "selected_job_ids": sorted(selected_ids),
+                "migration_reason": (
+                    "Openclaw 自带 cron 可能因为进程重启或运行环境问题漏执行；"
+                    "SalesBrain 是确定性程序调度，会持续记录心跳、任务状态和失败记录，"
+                    "更适合承接销售跟进、日报审阅、工作分析这类关键定时任务。"
+                ),
+                "openclaw_cron_jobs": cron_jobs,
+                "business_cron_candidates": business_candidates,
+            }
+        )
+        prompt = build_first_cron_migration_prompt(context)
+        return self._wake_openclaw(kind="first_cron_migration", prompt=prompt, context=context, now=now)
+
+    def complete_first_cron_migration(
+        self,
+        *,
+        mode: str = "all",
+        selected_job_ids: list[str] | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        now = now or now_in_zone(self.config.timezone)
+        now_iso = self.now_iso(now)
+        mode = mode.strip().lower()
+        if mode not in {"all", "none", "selected"}:
+            raise ValueError(f"unsupported_cron_migration_mode: {mode}")
+        inspect_result = self.inspect_openclaw_cron()
+        if mode == "none":
+            result = {
+                "ok": True,
+                "skipped": True,
+                "mode": mode,
+                "inspect_result": inspect_result,
+                "summary": "用户选择不迁移 Openclaw 遗留业务定时任务。",
+            }
+        else:
+            result = self.first_cron_migration(
+                now=now,
+                migration_mode=mode,
+                selected_job_ids=selected_job_ids or [],
+            )
+            result["mode"] = mode
+            result["inspect_result"] = inspect_result
+        if result.get("ok"):
+            self.store.set_state(FIRST_CRON_MIGRATION_DONE_KEY, "1", now_iso=now_iso)
+            self.store.set_state(FIRST_CRON_MIGRATION_SUMMARY_KEY, json.dumps(result, ensure_ascii=False), now_iso=now_iso)
+            self._mark_first_run_done_if_complete(now=now)
+        return result
+
+    def complete_initial_analysis(self, *, now: datetime | None = None) -> dict[str, Any]:
+        now = now or now_in_zone(self.config.timezone)
+        result = self.initial_analysis(now=now)
+        report = self.build_initial_analysis_report(result)
+        if result.get("ok"):
+            now_iso = self.now_iso(now)
+            self.store.set_state(FIRST_INITIAL_ANALYSIS_DONE_KEY, "1", now_iso=now_iso)
+            self.store.set_state(FIRST_INITIAL_ANALYSIS_REPORT_KEY, json.dumps(report, ensure_ascii=False), now_iso=now_iso)
+            self._mark_first_run_done_if_complete(now=now)
+        result["analysis_report"] = report
+        return result
+
+    def complete_first_eboss_sync(self, *, now: datetime | None = None) -> dict[str, Any]:
+        now = now or now_in_zone(self.config.timezone)
+        result = self.sync_eboss(now=now, force_full=True)
+        if result.get("ok"):
+            self.store.set_state(FIRST_EBOSS_FULL_SYNC_DONE_KEY, "1", now_iso=self.now_iso(now))
+            self._mark_first_run_done_if_complete(now=now)
+        return result
+
+    def build_initial_analysis_report(self, analysis_result: dict[str, Any] | None = None) -> dict[str, Any]:
+        opportunities = self._recent_records_by_type("opportunity", 1000)
+        customers = self._recent_records_by_type("customer", 1000)
+        leads = self._recent_records_by_type("lead", 1000)
+        tasks = self._recent_records_by_type("eboss_task", 1000)
+        daily_reports = self._recent_records_by_type("daily_report", 30)
+        recent_follow_records = (
+            self._recent_records_by_type("project_follow_record", 1000)
+            + self._recent_records_by_type("opportunity_follow_record", 1000)
+            + self._recent_records_by_type("follow_record", 1000)
+        )
+
+        def payloads(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            values: list[dict[str, Any]] = []
+            for record in records:
+                payload = _loads(record.get("payload_json"), {})
+                if isinstance(payload, dict):
+                    values.append(payload)
+            return values
+
+        opportunity_payloads = payloads(opportunities)
+        customer_payloads = payloads(customers)
+        lead_payloads = payloads(leads)
+        follow_payloads = payloads(recent_follow_records)
+
+        status_distribution: dict[str, int] = {}
+        amount_total = 0.0
+        amount_seen = False
+        key_opportunities: list[str] = []
+        for payload in opportunity_payloads:
+            status = _first_payload_value(payload, ["optState", "optStateName", "status", "statusName", "stageName"])
+            if status is not None:
+                status_text = str(status)
+                status_distribution[status_text] = status_distribution.get(status_text, 0) + 1
+            amount = _first_payload_value(
+                payload,
+                ["amount", "optAmount", "estimatedAmount", "forecastAmount", "budgetAmount", "salesAmount"],
+            )
+            if amount not in (None, ""):
+                try:
+                    amount_total += float(str(amount).replace(",", ""))
+                    amount_seen = True
+                except ValueError:
+                    pass
+            name = _first_payload_value(payload, ["optName", "opportunityName", "name", "title"])
+            if name and len(key_opportunities) < 5:
+                key_opportunities.append(str(name))
+
+        overdue_customers: list[dict[str, Any]] = []
+        for payload in customer_payloads:
+            name = str(_first_payload_value(payload, ["custName", "customerName", "name"]) or "未命名客户")
+            last_follow = _first_payload_value(payload, ["lastFollowTime", "lastFollowDate", "followTime", "updatedAt"])
+            no_follow_days = _first_payload_value(payload, ["noFollowDays", "unFollowDays", "daysSinceLastFollow"])
+            item = {"name": name, "last_follow": last_follow, "no_follow_days": no_follow_days}
+            if no_follow_days not in (None, ""):
+                try:
+                    if int(float(str(no_follow_days))) >= 7:
+                        overdue_customers.append(item)
+                except ValueError:
+                    overdue_customers.append(item)
+            elif len(overdue_customers) < 3:
+                overdue_customers.append(item)
+
+        new_leads_this_week = 0
+        for payload in lead_payloads:
+            created = _first_payload_value(payload, ["createTime", "createdAt", "assignTime"])
+            if created:
+                new_leads_this_week += 1
+
+        applied = (analysis_result or {}).get("applied")
+        if not isinstance(applied, dict):
+            applied = {}
+        suggestions: list[str] = []
+        for task in applied.get("created_tasks") or []:
+            if isinstance(task, dict) and task.get("title"):
+                suggestions.append(str(task["title"]))
+        for suggestion in applied.get("review_suggestions") or []:
+            if isinstance(suggestion, dict) and suggestion.get("title"):
+                suggestions.append(str(suggestion["title"]))
+        suggestions = suggestions[:3]
+        if not suggestions:
+            suggestions = [
+                "优先跟进金额高、阶段停滞或近期承诺过下一步的商机。",
+                "检查超过 7 天未联系的客户，并补齐下一步动作。",
+                "梳理新线索来源和转化路径，给每条线索设置下一步跟进时间。",
+            ]
+
+        report = {
+            "opportunities": {
+                "count": len(opportunities),
+                "amount_total": amount_total if amount_seen else None,
+                "status_distribution": status_distribution,
+                "key_items": key_opportunities[:3],
+                "priority_followup_count": len(suggestions),
+            },
+            "customers": {
+                "count": len(customers),
+                "overdue_followup_count": len(overdue_customers),
+                "overdue_examples": overdue_customers[:3],
+                "follow_record_count": len(recent_follow_records),
+            },
+            "leads": {
+                "count": len(leads),
+                "new_this_week_estimate": min(new_leads_this_week, len(leads)),
+            },
+            "tasks": {
+                "eboss_task_count": len(tasks),
+                "local_pending_count": len(self.list_tasks(status="pending", limit=1000)),
+            },
+            "daily_reports": {
+                "synced_days": len(daily_reports),
+            },
+            "top_3_recommendations": suggestions,
+        }
+        lines = [
+            "═══════════════════════════════════",
+            "首次分析报告",
+            "═══════════════════════════════════",
+            f"商机：{report['opportunities']['count']} 个",
+        ]
+        if report["opportunities"]["amount_total"] is not None:
+            lines.append(f"商机金额合计：{report['opportunities']['amount_total']}")
+        if status_distribution:
+            status_text = "、".join(f"{key}:{value}" for key, value in status_distribution.items())
+            lines.append(f"状态分布：{status_text}")
+        if key_opportunities:
+            lines.append("重点关注：" + "、".join(key_opportunities[:3]))
+        lines.append(f"建议优先跟进：{len(suggestions)} 个")
+        lines.append(f"客户：{report['customers']['count']} 个")
+        lines.append(f"待跟进客户：{report['customers']['overdue_followup_count']} 个")
+        for customer in overdue_customers[:3]:
+            detail = customer["name"]
+            if customer.get("no_follow_days") not in (None, ""):
+                detail += f"（{customer['no_follow_days']} 天未跟进）"
+            elif customer.get("last_follow"):
+                detail += f"（最近跟进：{customer['last_follow']}）"
+            lines.append(f"客户待跟进：{detail}")
+        lines.append(f"线索：{report['leads']['count']} 个")
+        lines.append(f"本周新增线索估算：{report['leads']['new_this_week_estimate']} 个")
+        lines.append(f"EBOSS 任务：{report['tasks']['eboss_task_count']} 个")
+        lines.append(f"日报：已同步最近 {report['daily_reports']['synced_days']} 天")
+        lines.append("建议：")
+        for index, suggestion in enumerate(suggestions, start=1):
+            lines.append(f"{index}. {suggestion}")
+        lines.append("═══════════════════════════════════")
+        report["formatted_report"] = "\n".join(lines)
+        return report
 
     def _eboss(self) -> EbossClient:
         if self._eboss_client is None:
@@ -380,18 +843,43 @@ class SalesBrainService:
             "remote_revision": commit["sha"],
         }
 
-    def sync_eboss(self, *, now: datetime | None = None) -> dict[str, Any]:
+    def sync_eboss(self, *, now: datetime | None = None, force_full: bool = False) -> dict[str, Any]:
         now = now or now_in_zone(self.config.timezone)
+        is_first_full = bool(force_full or (self.config.eboss_first_full_sync and self.store.get_state(FIRST_EBOSS_FULL_SYNC_DONE_KEY) != "1"))
+        sync_mode = "first_full" if is_first_full else "active"
         started_at = self.now_iso(now)
         run_id = self.store.insert_sync_run(
             run_type="eboss_sync",
             started_at=started_at,
             status="running",
-            payload_json={"sales_name": self.config.sales_name},
+            payload_json={"sales_name": self.config.sales_name, "sync_mode": sync_mode},
         )
         counts: dict[str, int] = {}
         errors: list[dict[str, str]] = []
-        client = self._eboss()
+        warnings: list[dict[str, str]] = []
+        try:
+            client = self._eboss()
+        except Exception as exc:
+            finished_at = self.now_iso(now)
+            error = {"api_id": "eboss_client", "error": str(exc)}
+            self.store.update_sync_run(
+                run_id,
+                status="failed",
+                finished_at=finished_at,
+                error=str(exc),
+                counts_json=counts,
+                payload_json={"errors": [error], "sync_mode": sync_mode},
+            )
+            return {
+                "ok": False,
+                "run_id": run_id,
+                "status": "failed",
+                "sync_mode": sync_mode,
+                "error": str(exc),
+                "counts": counts,
+                "errors": [error],
+                "warnings": warnings,
+            }
 
         def insert(api_id: str, object_type: str, records: list[dict[str, Any]]) -> None:
             count = self.store.insert_raw_records(
@@ -402,6 +890,19 @@ class SalesBrainService:
                 fetched_at=self.now_iso(now),
             )
             counts[object_type] = counts.get(object_type, 0) + count
+
+        def upsert_object(api_id: str, object_type: str, object_id: str, object_name: str, payload: dict[str, Any]) -> None:
+            inserted = self.store.upsert_raw_record_by_object(
+                sync_run_id=run_id,
+                api_id=api_id,
+                object_type=object_type,
+                object_id=object_id,
+                object_name=object_name,
+                payload=payload,
+                fetched_at=self.now_iso(now),
+            )
+            if inserted:
+                counts[object_type] = counts.get(object_type, 0) + 1
 
         def upsert_daily_report(query_date: str, payload: dict[str, Any]) -> None:
             inserted = self.store.upsert_raw_record_by_object(
@@ -415,6 +916,68 @@ class SalesBrainService:
             )
             if inserted:
                 counts["daily_report"] = counts.get("daily_report", 0) + 1
+
+        def dedupe_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            seen: set[str] = set()
+            unique: list[dict[str, Any]] = []
+            for record in records:
+                object_id, object_name = EbossClient.extract_object_summary(record)
+                key = object_id or object_name or json.dumps(record, ensure_ascii=False, sort_keys=True)
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique.append(record)
+            return unique
+
+        def fetch_paginated_variants(
+            api_id: str,
+            object_type: str,
+            variants: list[dict[str, Any]],
+            *,
+            max_pages: int,
+            fallback_variants: list[dict[str, Any]] | None = None,
+        ) -> list[dict[str, Any]]:
+            records: list[dict[str, Any]] = []
+            active_variants = variants
+            try:
+                for params in active_variants:
+                    records.extend(client.call_paginated(api_id, params, max_pages=max_pages))
+            except Exception as exc:
+                if not fallback_variants:
+                    errors.append({"api_id": api_id, "object_type": object_type, "error": str(exc)})
+                    return dedupe_records(records)
+                warnings.append({"api_id": api_id, "object_type": object_type, "warning": f"primary_params_failed_fallback_used: {exc}"})
+                for params in fallback_variants:
+                    try:
+                        records.extend(client.call_paginated(api_id, params, max_pages=max_pages))
+                    except Exception as fallback_exc:
+                        errors.append({"api_id": api_id, "object_type": object_type, "error": str(fallback_exc)})
+            return dedupe_records(records)
+
+        def records_or_raw(api_id: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+            response = client.call(api_id, params)
+            records = response.records
+            return records if records else [dict(response.raw)]
+
+        def insert_related(
+            *,
+            api_id: str,
+            object_type: str,
+            params: dict[str, Any],
+            parent_id: str,
+            parent_name: str,
+        ) -> None:
+            try:
+                records = records_or_raw(api_id, params)
+                enriched = []
+                for record in records:
+                    payload = dict(record)
+                    payload["salesbrain_parent_id"] = parent_id
+                    payload["salesbrain_parent_name"] = parent_name
+                    enriched.append(payload)
+                insert(api_id, object_type, enriched)
+            except Exception as exc:
+                errors.append({"api_id": api_id, "object_type": object_type, "object_id": parent_id, "error": str(exc)})
 
         try:
             user_resp = client.call(
@@ -459,33 +1022,59 @@ class SalesBrainService:
             }
 
         today_query_date = now.date().isoformat()
-        page_size = str(self.config.eboss_page_size)
-        sync_plan = [
-            (
-                "get-project-list",
-                "project",
-                {
-                    "current": "1",
-                    "size": page_size,
-                    "projectStatusList": "1,10,11,12",
-                    "sheet": "3",
-                    "projectManagerIds": user_id,
-                },
-                True,
-            ),
-            (
-                "get-opportunity-list",
-                "opportunity",
-                {
-                    "current": "1",
-                    "size": page_size,
-                    "optStateList": "1,2",
-                    "optTypeList": "1,2,3",
-                    "opportunity": "3",
-                    "chargerOpIdList": user_id,
-                },
-                True,
-            ),
+        page_size = str(self.config.eboss_full_sync_page_size if is_first_full else self.config.eboss_page_size)
+        max_pages = self.config.eboss_full_sync_max_pages if is_first_full else self.config.eboss_daily_active_sync_max_pages
+        project_statuses = "1,2,3,4,10,11,12,13,14" if is_first_full else "1,10,11,12"
+        project_sheets = ("1", "2", "3", "4", "5", "6") if is_first_full else ("3",)
+        opportunity_ranges = ("1", "2", "3", "4", "5", "6") if is_first_full else ("3",)
+        opportunity_states = "1,2,3,4,5,6,7,8,9" if is_first_full else "1,2"
+
+        project_variants = [
+            {
+                "current": "1",
+                "size": page_size,
+                "projectStatusList": project_statuses,
+                "sheet": sheet,
+                **({"projectManagerIds": user_id} if sheet == "3" else {}),
+            }
+            for sheet in project_sheets
+        ]
+        project_records = fetch_paginated_variants("get-project-list", "project", project_variants, max_pages=max_pages)
+        insert("get-project-list", "project", project_records)
+
+        opportunity_variants = [
+            {
+                "current": "1",
+                "size": page_size,
+                "optStateList": opportunity_states,
+                "optTypeList": "1,2,3",
+                "opportunity": scope,
+                **({"chargerOpIdList": user_id} if scope == "3" else {}),
+            }
+            for scope in opportunity_ranges
+        ]
+        opportunity_fallback = [
+            {
+                "current": "1",
+                "size": page_size,
+                "optStateList": "1,2",
+                "optTypeList": "1,2,3",
+                "opportunity": scope,
+                **({"chargerOpIdList": user_id} if scope == "3" else {}),
+            }
+            for scope in opportunity_ranges
+        ]
+        opportunity_records = fetch_paginated_variants(
+            "get-opportunity-list",
+            "opportunity",
+            opportunity_variants,
+            max_pages=max_pages,
+            fallback_variants=opportunity_fallback if is_first_full else None,
+        )
+        insert("get-opportunity-list", "opportunity", opportunity_records)
+
+        successful = int(bool(project_records)) + int(bool(opportunity_records))
+        for api_id, object_type, params in [
             (
                 "get-customer-list",
                 "customer",
@@ -496,7 +1085,6 @@ class SalesBrainService:
                     "cust": "7",
                     "chargeIdStr": user_id,
                 },
-                True,
             ),
             (
                 "get-lead-list",
@@ -508,7 +1096,6 @@ class SalesBrainService:
                     "lead": "2",
                     "assignUserIds": user_id,
                 },
-                True,
             ),
             (
                 "get-task-list",
@@ -523,25 +1110,48 @@ class SalesBrainService:
                     "statuss": "5,1",
                     "taskUserIds": user_id,
                 },
-                True,
             ),
-        ]
-
-        successful = 0
-        for api_id, object_type, params, paginated in sync_plan:
+        ]:
             try:
-                if paginated:
-                    records = client.call_paginated(
-                        api_id,
-                        params,
-                        max_pages=self.config.eboss_max_pages,
-                    )
-                else:
-                    records = client.call(api_id, params).records
-                insert(api_id, object_type, records)
+                records = client.call_paginated(api_id, params, max_pages=max_pages)
+                insert(api_id, object_type, dedupe_records(records))
                 successful += 1
             except Exception as exc:
-                errors.append({"api_id": api_id, "error": str(exc)})
+                errors.append({"api_id": api_id, "object_type": object_type, "error": str(exc)})
+
+        for project in project_records:
+            project_id, project_name = EbossClient.extract_object_summary(project)
+            if not project_id:
+                continue
+            project_name = project_name or project_id
+            for api_id, object_type, params in [
+                ("get-project-detail", "project_detail", {"id": project_id}),
+                ("get-stage-list", "project_stage", {"projectId": project_id, "taskObj": "21", "ifOrderMs": "true"}),
+                ("get-task-by-project-opp", "project_task", {"taskObj": "21", "taskObjId": project_id}),
+                ("get-follow-record", "project_follow_record", {"followObj": "21", "followObjId": project_id, "current": "1", "size": page_size, "dateTag": "0"}),
+                ("get-project-budget", "project_budget", {"projectId": project_id}),
+                ("get-project-forecast", "project_forecast", {"projectId": project_id}),
+                ("get-project-actual", "project_actual", {"projectId": project_id}),
+                ("get-requirement-list", "project_requirement", {"projectId": project_id, "projectIds": project_id, "current": "1", "size": page_size, "queryType": "0", "statuss": "1,2"}),
+                ("get-project-doc-list", "project_document", {"attachObj": "21", "attachObjId": project_id}),
+            ]:
+                insert_related(api_id=api_id, object_type=object_type, params=params, parent_id=project_id, parent_name=project_name)
+
+        for opportunity in opportunity_records:
+            opportunity_id, opportunity_name = EbossClient.extract_object_summary(opportunity)
+            if not opportunity_id:
+                continue
+            opportunity_name = opportunity_name or opportunity_id
+            for api_id, object_type, params in [
+                ("get-opportunity-detail", "opportunity_detail", {"id": opportunity_id}),
+                ("get-stage-list", "opportunity_stage", {"projectId": opportunity_id, "taskObj": "4", "ifOrderMs": "true"}),
+                ("get-task-by-project-opp", "opportunity_task", {"taskObj": "4", "taskObjId": opportunity_id}),
+                ("get-follow-record", "opportunity_follow_record", {"followObj": "4", "followObjId": opportunity_id, "current": "1", "size": page_size, "dateTag": "0"}),
+                ("get-opportunity-budget", "opportunity_budget", {"optId": opportunity_id}),
+                ("get-opportunity-forecast", "opportunity_forecast", {"optId": opportunity_id}),
+                ("get-opportunity-actual", "opportunity_actual", {"optId": opportunity_id}),
+            ]:
+                insert_related(api_id=api_id, object_type=object_type, params=params, parent_id=opportunity_id, parent_name=opportunity_name)
 
         try:
             response = client.call("get-daily-report-self", {"queryDate": today_query_date})
@@ -576,6 +1186,9 @@ class SalesBrainService:
             if backfill_errors == 0 and backfill_success == 30:
                 self.store.set_state(GITHUB_BACKFILL_DONE_KEY, "1", now_iso=self.now_iso(now))
 
+        if is_first_full and not errors:
+            self.store.set_state(FIRST_EBOSS_FULL_SYNC_DONE_KEY, "1", now_iso=self.now_iso(now))
+
         finished_at = self.now_iso()
         status = "success"
         if errors and successful:
@@ -588,14 +1201,24 @@ class SalesBrainService:
             finished_at=finished_at,
             error=json.dumps(errors, ensure_ascii=False) if errors else None,
             counts_json=counts,
-            payload_json={"errors": errors, "user_id": user_id, "real_name": real_name},
+            payload_json={
+                "errors": errors,
+                "warnings": warnings,
+                "user_id": user_id,
+                "real_name": real_name,
+                "sync_mode": sync_mode,
+                "project_count": len(project_records),
+                "opportunity_count": len(opportunity_records),
+            },
         )
         return {
             "ok": status != "failed",
             "run_id": run_id,
             "status": status,
+            "sync_mode": sync_mode,
             "counts": counts,
             "errors": errors,
+            "warnings": warnings,
         }
 
     def github_update_check(self, *, now: datetime | None = None) -> dict[str, Any]:
@@ -606,7 +1229,7 @@ class SalesBrainService:
         except Exception as exc:
             wake = self.record_wake_result(
                 {
-                    "wake_type": "github_update_check",
+                    "wake_type": "salesbrain_update_check",
                     "status": "failed",
                     "input_summary": "github update check failed",
                     "result_summary": "github update check failed",
@@ -626,7 +1249,7 @@ class SalesBrainService:
             self.store.set_state(GITHUB_INSTALLED_REVISION_KEY, remote["sha"], now_iso=now_iso)
             wake = self.record_wake_result(
                 {
-                    "wake_type": "github_update_check",
+                    "wake_type": "salesbrain_update_check",
                     "status": "skipped",
                     "input_summary": "baseline established",
                     "result_summary": "baseline established",
@@ -646,38 +1269,43 @@ class SalesBrainService:
                 "github": remote,
             }
 
-        if not comparison["update_available"]:
-            wake = self.record_wake_result(
-                {
-                    "wake_type": "github_update_check",
-                    "status": "skipped",
-                    "input_summary": "already up to date",
-                    "result_summary": "SalesBrain is already up to date.",
-                    "payload_json": {
-                        "repo": self.config.github_repo,
-                        "branch": self.config.github_branch,
-                        "remote_revision": remote["sha"],
-                        "installed_revision": installed,
-                    },
-                },
-                now=now,
-            )
-            return {
-                "ok": True,
-                "up_to_date": True,
-                "wake_run": wake,
-                "github": remote,
-            }
-
-        context = {
+        base_context = {
+            "local_version": self._local_version_context(installed_revision=installed),
+            "company_skillhub": {
+                "install_command": self.config.company_skillhub_install_command,
+                "priority": 1,
+                "check_required": True,
+            },
+            "github": {
+                "repo": self.config.github_repo,
+                "branch": self.config.github_branch,
+                "priority": 2,
+                "version": remote["sha"],
+                "commit": remote,
+            },
             "repo": self.config.github_repo,
             "branch": self.config.github_branch,
             "installed_revision": installed,
             "remote_revision": remote["sha"],
             "remote_commit": remote,
+            "github_update_available": comparison["update_available"],
         }
+
+        if not comparison["update_available"]:
+            prompt = build_github_update_prompt(base_context)
+            result = self._wake_openclaw(kind="salesbrain_update_check", prompt=prompt, context=base_context, now=now)
+            return {
+                "ok": result["ok"],
+                "up_to_date": True,
+                "wake_run": result["wake_run"],
+                "openclaw_result": result["openclaw_result"],
+                "applied": result["applied"],
+                "github": remote,
+            }
+
+        context = base_context
         prompt = build_github_update_prompt(context)
-        result = self._wake_openclaw(kind="github_update_check", prompt=prompt, context=context, now=now)
+        result = self._wake_openclaw(kind="salesbrain_update_check", prompt=prompt, context=context, now=now)
         self.store.set_state(GITHUB_LAST_PROMPTED_REVISION_KEY, remote["sha"], now_iso=now_iso)
         return {
             "ok": result["ok"],
@@ -687,6 +1315,24 @@ class SalesBrainService:
             "applied": result["applied"],
             "github": remote,
         }
+
+    def _local_version_context(self, *, installed_revision: str | None = None) -> dict[str, Any]:
+        try:
+            from . import __version__
+        except Exception:
+            __version__ = "unknown"
+        bundle_meta_path = self.config.home / ".salesbrain-bundle.json"
+        bundle_meta = None
+        if bundle_meta_path.exists():
+            bundle_meta = _loads(bundle_meta_path.read_text(encoding="utf-8"), {})
+        return {
+            "package_version": __version__,
+            "installed_revision": installed_revision or self.store.get_state(GITHUB_INSTALLED_REVISION_KEY),
+            "bundle_meta": bundle_meta,
+        }
+
+    def salesbrain_update_check(self, *, now: datetime | None = None) -> dict[str, Any]:
+        return self.github_update_check(now=now)
 
     def github_mark_installed(self, sha: str | None = None, *, now: datetime | None = None) -> dict[str, Any]:
         now = now or now_in_zone(self.config.timezone)
@@ -722,6 +1368,7 @@ class SalesBrainService:
                 _decode_json_columns(item)
                 for item in self.store.list_workflow_items(limit=20)
             ],
+            "workflow_inbox_items": self.list_workflow_inbox_items(review_status="pending", limit=20),
         }
 
     def search_eboss(self, keyword: str, limit: int = 20) -> dict[str, Any]:
@@ -775,11 +1422,139 @@ class SalesBrainService:
     def list_workflow_items(self, limit: int = 100) -> list[dict[str, Any]]:
         return [_decode_json_columns(item) for item in self.store.list_workflow_items(limit=limit)]
 
+    def list_workflow_inbox_items(self, review_status: str | None = "pending", limit: int = 100) -> list[dict[str, Any]]:
+        return [
+            _decode_json_columns(item)
+            for item in self.store.list_workflow_inbox_items(review_status=review_status, limit=limit)
+        ]
+
     def list_wake_runs(self, limit: int = 100) -> list[dict[str, Any]]:
         return [_decode_json_columns(item) for item in self.store.list_wake_runs(limit=limit)]
 
     def list_scheduler_jobs(self) -> list[dict[str, Any]]:
         return [_decode_json_columns(item) for item in self.store.list_scheduler_jobs()]
+
+    def _planned_wake_jobs(self, *, wake_kind: str | None = None) -> list[dict[str, Any]]:
+        jobs: list[dict[str, Any]] = []
+        for job in self.list_scheduler_jobs():
+            if str(job.get("handler_name") or "") != "planned_wake":
+                continue
+            payload = job.get("payload_json")
+            if not isinstance(payload, dict):
+                payload = _loads(payload, {})
+            if wake_kind and str(payload.get("wake_kind") or "") != wake_kind:
+                continue
+            jobs.append(job)
+        return jobs
+
+    def _disable_existing_planned_wakes(self, wake_kind: str, *, now: datetime | None = None) -> None:
+        now_iso = self.now_iso(now)
+        for job in self._planned_wake_jobs(wake_kind=wake_kind):
+            if int(job.get("enabled", 1)) != 1:
+                continue
+            self.store.set_scheduler_job_enabled(
+                str(job["job_name"]),
+                False,
+                payload_json={
+                    "disabled_by": "adaptive_next_wake_replaced",
+                    "disabled_at": now_iso,
+                    "wake_kind": wake_kind,
+                },
+            )
+
+    def _adaptive_followup_due_at(self, now: datetime) -> datetime:
+        candidate = (now + timedelta(hours=2)).replace(second=0, microsecond=0)
+        business_cutoff = now.replace(hour=19, minute=30, second=0, microsecond=0)
+        if now.weekday() < 5 and candidate <= business_cutoff:
+            return candidate
+
+        next_day = now + timedelta(days=1)
+        candidate = next_day.replace(hour=9, minute=30, second=0, microsecond=0)
+        while candidate.weekday() >= 5:
+            candidate += timedelta(days=1)
+        return candidate
+
+    def _has_active_followup_signal(self, context: dict[str, Any] | None) -> bool:
+        if not isinstance(context, dict):
+            return False
+        for key in ("due_tasks", "pending_tasks", "open_review_suggestions"):
+            value = context.get(key)
+            if isinstance(value, list) and value:
+                return True
+        latest_sync = context.get("latest_sync")
+        return bool(latest_sync)
+
+    def _fallback_next_wake_plan(
+        self,
+        *,
+        source_kind: str,
+        now: datetime,
+        source_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if source_kind == "work_followup" or (
+            source_kind in {"initial_analysis", "morning_analysis", "daily_report_review"}
+            and self._has_active_followup_signal(source_context)
+        ):
+            due_at = self._adaptive_followup_due_at(now)
+            return {
+                "kind": "work_followup",
+                "due_at": due_at.isoformat(timespec="seconds"),
+                "reason": "SalesBrain fallback adaptive follow-up because Openclaw did not return an explicit next_wake_plans item.",
+                "priority": "normal",
+                "replace_existing": True,
+                "payload_json": {
+                    "fallback": True,
+                    "source_kind": source_kind,
+                },
+            }
+        return None
+
+    def schedule_next_wake(
+        self,
+        plan: dict[str, Any],
+        *,
+        source_kind: str,
+        now: datetime | None = None,
+        source_run_id: str | None = None,
+    ) -> dict[str, Any]:
+        now = now or now_in_zone(self.config.timezone)
+        wake_kind = str(plan.get("kind") or plan.get("wake_kind") or "").strip()
+        if wake_kind not in PLANNED_WAKE_KINDS:
+            raise ValueError(f"unsupported_next_wake_kind: {wake_kind or '<missing>'}")
+        due_raw = str(plan.get("due_at") or plan.get("wake_at") or "").strip()
+        if not due_raw:
+            raise ValueError("next_wake_plan.due_at is required")
+        due_at = parse_iso_datetime(due_raw)
+        min_due_at = now + timedelta(minutes=PLANNED_WAKE_MIN_DELAY_MINUTES)
+        if due_at < min_due_at:
+            due_at = min_due_at
+        due_at_iso = due_at.isoformat(timespec="seconds")
+        replace_existing = bool(plan.get("replace_existing", True))
+        if replace_existing:
+            self._disable_existing_planned_wakes(wake_kind, now=now)
+        payload_extra = plan.get("payload_json") if isinstance(plan.get("payload_json"), dict) else {}
+        payload = {
+            "wake_kind": wake_kind,
+            "source_kind": source_kind,
+            "source_run_id": source_run_id,
+            "reason": str(plan.get("reason") or ""),
+            "priority": str(plan.get("priority") or "normal"),
+            "replace_existing": replace_existing,
+            "retry_minutes": int(plan.get("retry_minutes") or PLANNED_WAKE_RETRY_MINUTES),
+            "scheduled_at": self.now_iso(now),
+            "payload_json": payload_extra,
+        }
+        job_name = f"{PLANNED_WAKE_JOB_PREFIX}{wake_kind}__{uuid.uuid4().hex[:12]}"
+        scheduled = self.store.upsert_scheduler_job(
+            job_name=job_name,
+            handler_name="planned_wake",
+            schedule_kind="one_shot_at",
+            schedule_value=due_at_iso,
+            next_run_at=due_at_iso,
+            enabled=True,
+            payload_json=payload,
+        )
+        return _decode_json_columns(scheduled)
 
     def list_due_tasks(self, *, now: datetime | None = None, limit: int = 20) -> list[dict[str, Any]]:
         return [
@@ -813,7 +1588,12 @@ class SalesBrainService:
         return self.team().status()
 
     def team_peers(self) -> dict[str, Any]:
-        return {"ok": True, "members": self.team().peers()}
+        members = self.team().peers()
+        return {
+            "ok": True,
+            "members": members,
+            "formatted_members": [self.team().format_member(member) for member in members],
+        }
 
     def team_announce(self) -> dict[str, Any]:
         member = self.team().announce_self(status="online")
@@ -852,12 +1632,16 @@ class SalesBrainService:
         *,
         source_kind: str,
         now: datetime | None = None,
+        source_run_id: str | None = None,
+        source_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized = normalize_decision(decision)
         created_tasks: list[dict[str, Any]] = []
         updated_tasks: list[dict[str, Any] | None] = []
         review_suggestions: list[dict[str, Any]] = []
         workflow_items: list[dict[str, Any]] = []
+        workflow_inbox_decisions: list[dict[str, Any]] = []
+        scheduled_wakes: list[dict[str, Any]] = []
         removed_cron_jobs: list[dict[str, Any]] = []
         errors: list[dict[str, str]] = []
 
@@ -899,6 +1683,72 @@ class SalesBrainService:
             except Exception as exc:
                 errors.append({"action": "record_workflow", "error": str(exc)})
 
+        for inbox_decision in normalized["workflow_inbox_decisions"]:
+            if not isinstance(inbox_decision, dict) or not inbox_decision.get("id"):
+                continue
+            inbox_id = str(inbox_decision["id"])
+            action = str(inbox_decision.get("action") or "ignore").strip().lower()
+            try:
+                inbox_item = self.store.get_workflow_inbox_item(inbox_id)
+                if not inbox_item:
+                    workflow_inbox_decisions.append({"id": inbox_id, "action": action, "applied": False, "reason": "not_found"})
+                    continue
+                decoded = _decode_json_columns(inbox_item)
+                if action in {"accept", "merge"}:
+                    merged = inbox_decision.get("merged_item") if isinstance(inbox_decision.get("merged_item"), dict) else {}
+                    workflow_payload = {
+                        "title": merged.get("title") or decoded["title"],
+                        "pattern_type": merged.get("pattern_type") or decoded["pattern_type"],
+                        "summary": merged.get("summary") or decoded["summary"],
+                        "example_json": merged.get("example_json") or decoded.get("example_json") or {},
+                        "source_task_ids_json": merged.get("source_task_ids_json") or decoded.get("source_task_ids_json") or [],
+                        "sync_status": merged.get("sync_status") or "ready",
+                    }
+                    workflow = self.record_workflow(workflow_payload, now=now)
+                    status = "merged" if action == "merge" else "accepted"
+                    self.store.update_workflow_inbox_item(inbox_id, {"review_status": status}, now_iso=self.now_iso(now))
+                    workflow_inbox_decisions.append({"id": inbox_id, "action": action, "applied": True, "workflow_item": workflow})
+                elif action in {"duplicate", "ignore", "ignored"}:
+                    status = "duplicate" if action == "duplicate" else "ignored"
+                    self.store.update_workflow_inbox_item(inbox_id, {"review_status": status}, now_iso=self.now_iso(now))
+                    workflow_inbox_decisions.append({"id": inbox_id, "action": action, "applied": True})
+                else:
+                    workflow_inbox_decisions.append({"id": inbox_id, "action": action, "applied": False, "reason": "unsupported_action"})
+            except Exception as exc:
+                errors.append({"action": "workflow_inbox_decision", "error": str(exc), "id": inbox_id})
+
+        for wake_plan in _coerce_next_wake_plans(normalized):
+            try:
+                scheduled_wakes.append(
+                    self.schedule_next_wake(
+                        wake_plan,
+                        source_kind=source_kind,
+                        source_run_id=source_run_id,
+                        now=now,
+                    )
+                )
+            except Exception as exc:
+                errors.append({"action": "schedule_next_wake", "error": str(exc)})
+
+        if not scheduled_wakes:
+            fallback_plan = self._fallback_next_wake_plan(
+                source_kind=source_kind,
+                now=now or now_in_zone(self.config.timezone),
+                source_context=source_context,
+            )
+            if fallback_plan:
+                try:
+                    scheduled_wakes.append(
+                        self.schedule_next_wake(
+                            fallback_plan,
+                            source_kind=source_kind,
+                            source_run_id=source_run_id,
+                            now=now,
+                        )
+                    )
+                except Exception as exc:
+                    errors.append({"action": "schedule_next_wake_fallback", "error": str(exc)})
+
         for job_id in normalized["cron_jobs_to_remove"]:
             job_id = str(job_id)
             if not job_id:
@@ -915,6 +1765,8 @@ class SalesBrainService:
             "updated_tasks": updated_tasks,
             "review_suggestions": review_suggestions,
             "workflow_items": workflow_items,
+            "workflow_inbox_decisions": workflow_inbox_decisions,
+            "scheduled_wakes": scheduled_wakes,
             "removed_cron_jobs": removed_cron_jobs,
             "errors": errors,
         }
@@ -946,7 +1798,13 @@ class SalesBrainService:
                     "context": context,
                 },
             )
-            applied = self.apply_openclaw_decision(result.raw, source_kind=kind, now=now)
+            applied = self.apply_openclaw_decision(
+                result.raw,
+                source_kind=kind,
+                now=now,
+                source_run_id=str(wake["id"]),
+                source_context=context,
+            )
             finished = self.store.update_wake_run(
                 wake["id"],
                 {
@@ -978,6 +1836,36 @@ class SalesBrainService:
             )
             return {"ok": False, "wake_run": _decode_json_columns(finished or wake), "error": str(exc)}
 
+    def planned_wake(
+        self,
+        *,
+        now: datetime | None = None,
+        scheduler_job: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload = scheduler_job.get("payload_json") if isinstance(scheduler_job, dict) else {}
+        if not isinstance(payload, dict):
+            payload = _loads(payload, {})
+        wake_kind = str(payload.get("wake_kind") or "").strip()
+        if wake_kind == "initial_analysis":
+            return self.initial_analysis(now=now)
+        if wake_kind == "morning_analysis":
+            return self.morning_analysis(now=now)
+        if wake_kind == "work_followup":
+            return self.work_followup(now=now)
+        if wake_kind == "daily_report_review":
+            return self.daily_report_review(now=now)
+        if wake_kind == "weekly_summary":
+            return self.weekly_summary(now=now)
+        if wake_kind == "workflow_reflection":
+            return self.workflow_reflection(now=now)
+        if wake_kind == "workflow_inbox_review":
+            return self.workflow_inbox_review(now=now)
+        return {
+            "ok": False,
+            "error": f"unsupported_planned_wake_kind: {wake_kind or '<missing>'}",
+            "scheduler_job": _decode_json_columns(scheduler_job or {}),
+        }
+
     def morning_analysis(self, *, now: datetime | None = None) -> dict[str, Any]:
         context = self._analysis_context(now=now, daily_report_limit=20)
         context["run_mode"] = "morning_analysis"
@@ -987,7 +1875,8 @@ class SalesBrainService:
     def work_followup(self, *, now: datetime | None = None) -> dict[str, Any]:
         context = self._analysis_context(now=now, daily_report_limit=20)
         context["run_mode"] = "work_followup"
-        context["target_times"] = list(self.config.work_followup_times)
+        context["followup_mode"] = "adaptive_first"
+        context["fallback_anchor_times"] = list(self.config.work_followup_times)
         prompt = build_work_followup_prompt(context)
         return self._wake_openclaw(kind="work_followup", prompt=prompt, context=context, now=now)
 
@@ -1041,6 +1930,53 @@ class SalesBrainService:
         )
         prompt = build_workflow_reflection_prompt(context)
         return self._wake_openclaw(kind="workflow_reflection", prompt=prompt, context=context, now=now)
+
+    def workflow_inbox_review(self, *, now: datetime | None = None, force: bool = False) -> dict[str, Any]:
+        now = now or now_in_zone(self.config.timezone)
+        inbox_items = self.list_workflow_inbox_items(review_status="pending", limit=50)
+        if not inbox_items:
+            wake = self.record_wake_result(
+                {
+                    "wake_type": "workflow_inbox_review",
+                    "status": "skipped",
+                    "input_summary": "no pending team workflow inbox items",
+                    "result_summary": "No pending team workflow inbox items.",
+                    "payload_json": {},
+                },
+                now=now,
+            )
+            return {"ok": True, "skipped": True, "wake_run": wake}
+        signature = "|".join(sorted(str(item.get("id") or "") for item in inbox_items))
+        if not force and signature and self.store.get_state(WORKFLOW_INBOX_LAST_PROMPT_SIGNATURE_KEY) == signature:
+            wake = self.record_wake_result(
+                {
+                    "wake_type": "workflow_inbox_review",
+                    "status": "skipped",
+                    "input_summary": "pending team workflow inbox items already prompted",
+                    "result_summary": "Pending team workflow inbox items were already sent to Openclaw for user confirmation.",
+                    "payload_json": {
+                        "pending_inbox_ids": [item.get("id") for item in inbox_items],
+                        "signature": signature,
+                    },
+                },
+                now=now,
+            )
+            return {"ok": True, "skipped": True, "already_prompted": True, "wake_run": wake}
+        context = self._analysis_context(now=now, daily_report_limit=10)
+        context["run_mode"] = "workflow_inbox_review"
+        context["workflow_inbox_items"] = inbox_items
+        context["requires_user_confirmation"] = True
+        context["confirmation_policy"] = {
+            "proactive_message_required": True,
+            "do_not_accept_without_user_confirmation": True,
+            "if_not_yet_confirmed": "ask the user in summary and return empty workflow_inbox_decisions",
+            "allowed_after_user_confirmation": ["accept", "merge", "ignore", "duplicate"],
+        }
+        prompt = build_workflow_inbox_review_prompt(context)
+        result = self._wake_openclaw(kind="workflow_inbox_review", prompt=prompt, context=context, now=now)
+        if signature:
+            self.store.set_state(WORKFLOW_INBOX_LAST_PROMPT_SIGNATURE_KEY, signature, now_iso=self.now_iso(now))
+        return result
 
     def monitor_scheduler(self, *, now: datetime | None = None, repair: bool = True) -> dict[str, Any]:
         now = now or now_in_zone(self.config.timezone)

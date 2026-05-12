@@ -1,6 +1,6 @@
 ---
 name: salesbrain
-description: "Use SalesBrain to run Openclaw sales mentoring and bootstrap the local SalesBrain checkout from GitHub. Use when SalesBrain wakes you for morning analysis, due task follow-up, workflow reflection, EBOSS sync review, GitHub update checks, or cron migration. Return structured JSON only."
+description: "SalesBrain 是给销售团队使用的 Openclaw 陪跑导师 Skill。首次使用时会先通过 skill 包内的安装脚本从 GitHub 拉取 SalesBrain 代码，完成 EBOSS 配置、首次全量同步、Openclaw cron 迁移和首次整体分析；之后由 SalesBrain 的确定性调度器唤醒 Openclaw，并支持每次分析后用 next_wake_plans 动态安排下一次跟进、日报审阅、周总结、方法沉淀、团队经验同步和版本更新确认。"
 allowed-tools: Bash
 metadata:
   clawdbot:
@@ -13,123 +13,241 @@ metadata:
     files:
       - "config.toml"
       - "salesbrain.sqlite"
+      - "README.md"
+      - "manifest.json"
+      - "_meta.json"
+      - "scripts/install.py"
 ---
 
 # SalesBrain
 
-SalesBrain is the scheduling and persistence layer for Openclaw-based sales mentoring.
-Openclaw does the thinking. SalesBrain stores state, runs schedules, and applies your structured decisions.
+SalesBrain 是 Openclaw 的销售陪跑调度层和状态层。
+Openclaw 负责分析和判断，SalesBrain 负责调度、落库、同步、提醒、团队发现和版本管理。
 
-## When to Use
+## 什么时候使用
 
-Use this skill whenever SalesBrain wakes you with one of these kinds:
+当 SalesBrain 唤醒你时，使用这些 wake kind：
 
 - `initial_analysis`
+- `first_cron_migration`
 - `morning_analysis`
 - `work_followup`
 - `daily_report_review`
 - `weekly_summary`
 - `due_task_scan`
 - `workflow_reflection`
-- `github_update_check`
+- `workflow_inbox_review`
+- `salesbrain_update_check`
 - `manual`
 
-Use it whenever you need to:
+你需要做的事情通常是：
 
-- review EBOSS snapshots and local follow-up tasks
-- decide what to remind, snooze, complete, or keep
-- extract reusable working patterns
-- identify business cron jobs that should move out of Openclaw
-- ask the user whether to update SalesBrain when GitHub has a newer commit
+- 读 EBOSS 上下文
+- 生成或更新任务
+- 产出 review suggestion
+- 沉淀 workflow items
+- 决定哪些 Openclaw 业务 cron 应迁移到 SalesBrain
+- 在 team inbox 里确认团队方法是否可入库
+- 在有更新时提醒用户选择公司 SkillHub 或 GitHub
 
-## Self-Bootstrap and Source of Truth
+## 首次安装
 
-This skill is the user-facing installer and operating contract for SalesBrain.
-The GitHub repository is the source of truth for the code and reference docs.
-A separate bridge file does not need to be distributed to Openclaw as long as this skill can clone the repo first.
+这个 skill 包是轻量包，不携带 SalesBrain 源码。
+首次安装时，要通过 skill 包里的安装脚本从 GitHub 拉取或更新 SalesBrain 代码。
 
-The first step after this skill is installed is always to sync the SalesBrain code from GitHub.
-Do not analyze anything, do not initialize anything, and do not assume the local checkout exists until this sync is done.
-
-If the repo does not exist yet, clone it from the official source:
+GitHub 安装脚本是：
 
 ```bash
-git clone https://github.com/FrankeyQu/SalesBrain.git ~/.openclaw/SalesBrain
+python <skill_root>/scripts/install.py
 ```
 
-If the repo already exists, update it before anything else:
+安装脚本会：
+
+1. 从 `https://github.com/FrankeyQu/SalesBrain.git` 拉取 `main` 分支到 `~/.openclaw/SalesBrain`
+2. 如果本地已经是 Git 仓库，则执行 `git fetch`、`git checkout main`、`git pull --ff-only`
+3. 如果旧目录不是 Git 仓库，则先备份旧目录，再重新 clone
+4. 安装本地 Python 包
+5. 保留本地 GitHub 来源和 revision 信息
+
+安装脚本执行成功后，再进入初始化流程。
+
+如果 Openclaw 需要先读取安装步骤，调用：
 
 ```bash
-cd ~/.openclaw/SalesBrain
-git pull --ff-only
+python <skill_root>/scripts/install.py --steps
 ```
 
-Then install or refresh the local package:
+如果 Openclaw 只需要检查本地是否已安装，调用：
 
 ```bash
-python -m pip install -e .
+python <skill_root>/scripts/install.py --check
 ```
 
-Then initialize SalesBrain:
+首次初始化不要直接让 `salesbrain init` 静默跑完整 first_run。必须使用分步命令：
 
 ```bash
-salesbrain init --sales-name "<sales name>"
-```
-
-During initialization, ask the user for the EBOSS API key if SalesBrain prompts for it.
-This is the value used in the EBOSS `api-key` HTTP header.
-`salesbrain init` immediately syncs EBOSS, backfills 30 days of daily reports, and runs one full `initial_analysis` wake-up.
-
-After a successful install or any later update, mark the installed revision:
-
-```bash
-salesbrain github mark-installed
-```
-
-Then make sure the long-running SalesBrain process is started:
-
-```bash
+salesbrain init --no-first-run --sales-name "<销售姓名>" --eboss-api-key "<EBOSS_API_KEY>"
+salesbrain first-run sync
+salesbrain first-run cron-inspect
+salesbrain first-run cron-migrate --mode all
+salesbrain first-run analyze
 salesbrain daemon
 ```
 
-`salesbrain daemon` runs both the personal scheduler and the LAN team node by default.
-Do not start a separate `salesbrain team serve` process on the same instance unless `salesbrain daemon --no-team` is being used.
+第 4 步必须先展示 `cron-inspect` 结果。如果发现遗留业务定时任务，要问用户：
 
-When the user later asks for an update, repeat the same sync-first sequence:
+```text
+发现 X 个 Openclaw 遗留业务定时任务。请选择：[迁移] [不迁移] [选择性迁移]
+```
 
-1. `cd ~/.openclaw/SalesBrain`
-2. `git pull --ff-only`
-3. `python -m pip install -e .`
-4. `salesbrain github mark-installed`
+用户选择后再执行：
 
-Openclaw already knows how to use SalesBrain because this skill contains:
+- 迁移：`salesbrain first-run cron-migrate --mode all`
+- 不迁移：`salesbrain first-run cron-migrate --mode none`
+- 选择性迁移：`salesbrain first-run cron-migrate --mode selected --job-id <job_id>`
 
-- the bootstrap order
-- the wake kinds
-- the JSON input and output contract
-- the rules for creating tasks, suggestions, workflow items, and cron removals
-- the LAN team-sync boundary
+第 5 步必须单独执行并展示进度：
 
-## Required Inputs
+```text
+⏳ 唤醒 Openclaw 做首次分析...
+⏳ 正在分析你的商机、客户、线索...
+```
 
-SalesBrain sends a JSON payload on stdin and also sets:
+命令完成后，把返回 JSON 中的 `analysis_report.formatted_report` 发送给用户，作为首次分析报告。
 
-- `SALESBRAIN_PAYLOAD_JSON`
-- `SALESBRAIN_WAKE_KIND`
+## 首次初始化流程
 
-The payload usually contains:
+首次初始化前，必须先告诉用户接下来会做什么，并且分阶段展示进度。
 
-- `run_id`
-- `kind`
-- `prompt`
-- `context`
-- `salesbrain_home`
+建议的说明文案：
 
-If stdin is empty, read `SALESBRAIN_PAYLOAD_JSON`.
+```text
+SalesBrain 将开始首次初始化。接下来会完成：
+1. 检查本地 SalesBrain 程序和配置；
+2. 读取 EBOSS API Key；
+3. 首次全量同步 EBOSS 项目、商机、日报和关联数据；
+4. 检查 Openclaw 现有业务定时任务，并迁移到 SalesBrain；
+5. 唤醒 Openclaw 做首次整体工作分析；
+6. 启动 SalesBrain 长期调度和团队同步。
+```
 
-## Required Output
+建议的进度条样式：
 
-Return JSON only. No markdown. No code fences. No extra commentary.
+```text
+[1/6] 正在检查本地 SalesBrain 程序...
+[2/6] 正在准备 EBOSS 配置...
+[3/6] 正在同步 EBOSS 全量数据...
+[4/6] 正在检查 Openclaw cron 并询问是否迁移...
+[5/6] 正在进行首次整体分析并生成报告...
+[6/6] 正在启动长期调度...
+```
+
+首次运行时要设置并检查这些状态：
+
+- `salesbrain_first_run_done`
+- `salesbrain_first_eboss_full_sync_done`
+- `salesbrain_first_cron_migration_done`
+- `salesbrain_first_initial_analysis_done`
+
+如果首次流程没有完成，`salesbrain daemon` 也要补跑，不允许等下一次定时。
+
+## 首次运行后会发生什么
+
+首次初始化完成后，SalesBrain 会：
+
+- 立即开始长期调度
+- 按固定时间同步 EBOSS
+- 唤醒 Openclaw 做晨间分析、跟进督促、日报审阅、周总结
+- 检查是否有新的 GitHub 或公司 SkillHub 更新
+- 维护内网团队节点和可复用方法同步
+
+首次运行结束后，要提醒销售可以自己调整这些时间：
+
+- 每日分析时间
+- 跟进督促时间
+- 日报审阅时间
+- 周总结时间
+- 工作方法沉淀时间
+
+## 更新顺序
+
+更新优先级固定为：
+
+1. 公司 SkillHub 的 `安装 SalesBrain`
+2. GitHub 仓库 `FrankeyQu/SalesBrain`
+
+更新时要先告诉用户当前对比结果，再让用户确认是否更新。
+
+如果公司 SkillHub 版本是最新，就优先用公司版本。
+如果 GitHub 更新更快，但公司包还没更新，也要先说明原因，再让用户决定。
+
+## 团队同步
+
+SalesBrain 的团队模式是内网自组织网络。
+它不是中央服务器模式，而是每个实例都维护本地副本。
+
+共享内容只有两类：
+
+- `team_members`
+- `workflow_sync_items` 中可复用的方法
+
+绝不共享：
+
+- 个人任务
+- 提醒事项
+- EBOSS 原始数据
+- EBOSS API Key
+- 日报原文
+- 私有记忆
+
+团队方法入库前，先做本地去重分析，再让 Openclaw 确认。
+如果本地判断可能重复，就先进入 inbox，不要直接写正式表。
+
+可用命令：
+
+```bash
+salesbrain team status
+salesbrain team peers
+salesbrain team announce
+salesbrain team sync
+```
+
+## 邻居发现
+
+邻居发现的顺序是：
+
+1. 先向 seed 节点通告并保活
+2. 如果已有 peer，就随机挑选少量 peer 做保活和同步
+3. 如果没有可用 peer，再做广播发现
+4. 如果广播仍失败，再扫描兜底网段
+
+默认 seed：
+
+```text
+http://10.50.3.37:37611
+```
+
+默认扫描网段：
+
+```text
+10.50.0.0/16
+```
+
+节点展示格式统一成：
+
+```text
+姓名：张三
+角色：sales
+节点：node_id
+地址：http://10.50.x.x:37611
+状态：online
+最后在线：2026-05-11 19:30:00
+来源：seed|peer|broadcast|scan
+```
+
+## 需要返回的 JSON
+
+返回 JSON only。不要 markdown，不要代码块，不要额外解释。
 
 ```json
 {
@@ -139,194 +257,176 @@ Return JSON only. No markdown. No code fences. No extra commentary.
   "tasks_to_update": [],
   "review_suggestions": [],
   "workflow_items": [],
+  "workflow_inbox_decisions": [],
+  "next_wake_plans": [],
   "cron_jobs_to_remove": [],
   "cron_jobs_to_keep": [],
   "notes": ""
 }
 ```
 
-## Core Rules
+### `workflow_items`
 
-- Do not write to EBOSS directly.
-- Do not schedule yourself inside Openclaw for business follow-ups.
-- Do not copy personal tasks, EBOSS raw records, EBOSS API keys, daily report originals, or private Openclaw memory into team-shared workflow items.
-- Do not invent facts that are not present in the payload context.
-- Keep every task concrete, dated, and actionable.
-- When SalesBrain asks you to create or update tasks, do it directly in the JSON response. Do not ask the sales person for confirmation first.
-- If nothing needs action, return `ok: true` and empty arrays.
-- For cron migration, only return business-user-task cron job ids in `cron_jobs_to_remove`.
-- Never remove system health, backup, maintenance, or platform cron jobs.
+用于沉淀可复用方法、习惯、项目推进套路、产品方向、前后端协作模式。
 
-## LAN Team Sync
+格式建议：
 
-SalesBrain V1 uses an internal self-organizing team network. There is no central SalesBrain server.
-Every instance keeps a local copy of the team member table and team workflow table.
-
-Shared through the LAN:
-
-- `team_members`: real name, node id, endpoint, role, status, version, `last_seen`, and update time
-- `workflow_sync_items`: reusable working methods, sales routines, review conclusions, product notes, and cross-role collaboration lessons
-
-Never shared through the LAN:
-
-- personal follow-up tasks
-- reminders
-- EBOSS raw records
-- EBOSS API keys or secrets
-- daily report original text
-- private Openclaw conversation memory
-
-Useful operations:
-
-```bash
-salesbrain team status
-salesbrain team peers
-salesbrain team announce
-salesbrain team sync
+```json
+{
+  "title": "方法标题",
+  "pattern_type": "followup|report|project|opportunity|product|collaboration|other",
+  "summary": "可复用方法摘要",
+  "example_json": {
+    "when_to_use": "适用场景",
+    "steps": ["步骤1", "步骤2"],
+    "signals": ["触发信号"],
+    "avoid": ["避免事项"]
+  },
+  "source_task_ids_json": [],
+  "sync_status": "ready"
+}
 ```
 
-If a team member cannot be discovered, check that all instances use the same `[team].name`, UDP `broadcast_port`, HTTP `http_port`, and optional `[team].secret`.
+如果只适合本地，不要同步到团队表，就把 `sync_status` 设成 `local_only`。
 
-## Behavior by Wake Kind
+### `workflow_inbox_decisions`
+
+团队同步来的方法会先进入 inbox。你要先确认是否重复，再决定：
+
+- `accept`
+- `merge`
+- `ignore`
+- `duplicate`
+
+如果要合并，请在 `merged_item` 里给出最终写入的规范版本。
+
+### `next_wake_plans`
+
+用于让 SalesBrain 动态安排下一次 Openclaw 唤醒。
+只要当前分析后还需要后续跟进，就返回一个具体未来时间。
+
+```json
+{
+  "kind": "work_followup",
+  "due_at": "2026-05-12T14:30:00+08:00",
+  "reason": "客户承诺 14:00 前反馈，需要下午确认是否推进。",
+  "priority": "normal",
+  "replace_existing": true,
+  "payload_json": {}
+}
+```
+
+原则：
+
+- 优先根据业务状态决定下一次唤醒时间，不要机械使用固定时点。
+- `08:30`、`13:30`、`19:30` 只是兜底锚点。
+- 如果同一类唤醒已有旧计划，新计划默认替换旧计划。
+
+## 行为规则
 
 ### `initial_analysis`
 
-This runs once after first installation and first EBOSS sync.
+首次整体分析。
+必须覆盖：
 
-Analyze the last 20 days of daily reports plus EBOSS project/opportunity/task data.
-Apply the 5.1 to 5.4 logic:
+- 最近 20 天日报里写过但没落实的下一步
+- 虚、空、没有行动项的日报
+- 项目阶段不合理、时间倒排来不及的情况
+- 现有 Openclaw cron 中应该迁移到 SalesBrain 的业务任务
+- 可复用工作方法和产品/协作方向
 
-- find promised next steps and missed follow-ups
-- find vague or weak daily reports
-- find unrealistic project timelines and stage delays
-- create the first follow-up tasks directly
+首次分析要尽量灵活，不要只做固定 checklist。
+
+### `first_cron_migration`
+
+首次 cron 迁移必须先于首次整体分析。
+要明确告诉用户迁移原因：SalesBrain 是确定性程序执行，能持续记录心跳和失败状态；Openclaw cron 偶尔会因为进程重启或环境问题漏执行。
+
+只返回业务 cron 的 `cron_jobs_to_remove`。
+不要删除系统健康、备份、平台维护、GitHub 更新、SalesBrain 自身任务。
 
 ### `morning_analysis`
 
-Review the EBOSS snapshot, pending tasks, and recent workflow context.
+早间分析。
+重点是：
 
-Return:
+- 生成新任务
+- 更新已有任务
+- 提醒明显卡住的项目或商机
+- 继续套用 5.1 到 5.4 逻辑
 
-- new follow-up tasks that should be created
-- task updates for items already in flight
-- review suggestions for the human
-- reusable workflow items worth keeping
-
-Apply these preset logic passes:
-
-- 5.1: review the last 20 days of reports for next-step commitments and missing follow-through
-- 5.2: identify vague reports or hollow progress and create concrete improvement tasks
-- 5.3: check stage timing against rough assumptions: 需求沟通 2-3 个月, 立项约 3 个月, 采购约 1 个月, 合同流程约 1 个月
-- 5.4: when weekly context is present, turn the weekly summary into next-week tasks
+如果早间分析发现上午或下午需要再次督促，直接返回 `next_wake_plans`。
 
 ### `work_followup`
 
-This runs at least three times per day, normally 08:30, 13:30, and 19:30.
-
-Push the sales person forward with concrete, timely actions.
-Create or update SalesBrain tasks directly when a follow-up is needed.
-Keep task titles short and executable.
+跟进督促。
+重点是短、直接、带日期的行动项。
+每次跟进后，都要判断是否还需要下一次检查；如果需要，就返回 `next_wake_plans`，让 SalesBrain 按业务节奏再次唤醒你。
 
 ### `daily_report_review`
 
-This runs at 22:00.
+日报审阅。
+重点是日报是否真实、是否有下一步、是否有过度乐观或空泛表述。
 
-Review the most recent daily report for quality, completeness, next actions, real progress, and vagueness.
-Create missing follow-up tasks directly.
-Return review suggestions when the daily report needs improvement.
+如果日报里出现未闭环承诺、虚泛进度或第二天必须推进的事项，返回 `next_wake_plans` 安排下一次检查。
 
 ### `weekly_summary`
 
-Summarize the current week, plan next week, and create next-week follow-up tasks directly.
-Return reusable methods as `workflow_items` when the week reveals a good habit, checklist, or project-push pattern.
+周总结。
+要能直接生成下周任务，并沉淀可复用方法。
 
 ### `due_task_scan`
 
-Review due and overdue tasks.
+处理到期和超期任务。
+结果可以是：
 
-Return one of these actions per task:
-
-- keep as-is
-- snooze with a new reminder time
-- mark done
-- keep pending if there is no clear action
-
-Keep the response short and practical.
+- 保持不变
+- 延后
+- 完成
+- 继续挂起
 
 ### `workflow_reflection`
 
-Summarize useful ways of working that should be kept and reused.
+沉淀工作方法。
+要输出：
 
-Return:
+- 值得保留的方法
+- 应迁移到 SalesBrain 的业务 cron
+- 还要先保留或更新的任务
 
-- workflow items worth learning
-- business cron jobs that should move to SalesBrain
-- any tasks that should be preserved or updated before the cron is removed
+不要在这个 wake 里创建普通销售提醒任务。
 
-Do not create normal sales reminder tasks in this wake.
-Keep reusable working methods, product/function directions, and front-end/back-end coordination ideas in `workflow_items`.
-Before returning a workflow item, remove private names, secrets, raw EBOSS content, and anything that is not safe for the internal team table.
+### `workflow_inbox_review`
 
-### `github_update_check`
+处理团队同步来的方法 inbox。
+SalesBrain 每 5 分钟检查一次 inbox；发现新同步候选时会主动唤醒你。
+你要先和已有 `workflow_items` 去重，然后主动询问用户是否采纳、合并、忽略或标记重复。
+未获得用户明确确认时，不要返回 `accept` 或 `merge`，只把 `summary` 写成给用户的确认问题，并保持 `workflow_inbox_decisions` 为空。
 
-SalesBrain found a newer commit in the GitHub repository.
+用户确认后，才可以返回：
 
-Return a direct user-facing question in `summary`, for example:
+- `accept`
+- `merge`
+- `ignore`
+- `duplicate`
 
-```json
-{
-  "ok": true,
-  "summary": "SalesBrain 有新版本，是否现在更新？",
-  "tasks_to_create": [],
-  "tasks_to_update": [],
-  "review_suggestions": [],
-  "workflow_items": [],
-  "cron_jobs_to_remove": [],
-  "cron_jobs_to_keep": [],
-  "notes": "Wait for user confirmation before updating."
-}
-```
+只有 `accept` 和 `merge` 会进入正式 `workflow_sync_items`。
 
-Do not run `git pull` or update automatically unless the user explicitly agrees.
-If the user agrees, update the local SalesBrain checkout and then run `salesbrain github mark-installed`.
+### `salesbrain_update_check`
 
-## Response Shape Notes
+检查版本时，要优先比较：
 
-- `tasks_to_create`: new tasks with `title`, `description`, `due_at`, optional `remind_at`, `priority`, `source_type`, `source_ref`
-- `tasks_to_update`: existing task ids plus fields to update
-- `review_suggestions`: short mentoring suggestions for the human
-- `workflow_items`: reusable methods, habits, or process patterns; set `sync_status` to `local_only` when the item is not safe for the internal team table
-- `cron_jobs_to_remove`: ids only
-- `cron_jobs_to_keep`: ids only
+1. 本地安装版本
+2. 公司 SkillHub 的 `安装 SalesBrain`
+3. GitHub 最新版本
 
-## Failure Handling
+如果有更新，必须先问用户，不要自动更新。
 
-If the context is insufficient, return a conservative empty response rather than guessing.
-If the payload is malformed, return:
+## 核心边界
 
-```json
-{
-  "ok": false,
-  "summary": "invalid payload",
-  "notes": "missing or unreadable context"
-}
-```
-
-## Mental Model
-
-SalesBrain owns:
-
-- schedule timing
-- persistence
-- task queues
-- EBOSS sync
-- reminder triggering
-
-Openclaw owns:
-
-- analysis
-- judgment
-- task decisions
-- workflow learning
-
-The boundary is intentional. Stay on your side of it.
+- 不要直接写 EBOSS
+- 不要把业务定时交回 Openclaw cron 负责
+- 不要把个人任务、原始 EBOSS 数据、API key、日报原文、私有记忆混入团队共享表
+- 不要在信息不足时猜
+- 任务要具体、可执行、带日期
+- SalesBrain 负责调度和存储，Openclaw 负责分析和判断

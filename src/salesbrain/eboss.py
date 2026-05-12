@@ -186,6 +186,11 @@ EBOSS_APIS: dict[str, dict[str, Any]] = {
         "path": "/sale-mgt/budgetprediction/budgetUnion/2",
         "params": {"projectId": {"required": True}},
     },
+    "get-project-actual": {
+        "method": "GET",
+        "path": "/sale-mgt/budgetprediction/budgetUnion/3",
+        "params": {"projectId": {"required": True}},
+    },
     "get-opportunity-budget": {
         "method": "GET",
         "path": "/sale-mgt/budgetprediction/budgetUnion/1",
@@ -196,10 +201,41 @@ EBOSS_APIS: dict[str, dict[str, Any]] = {
         "path": "/sale-mgt/budgetprediction/budgetUnion/2",
         "params": {"optId": {"required": True}},
     },
+    "get-opportunity-actual": {
+        "method": "GET",
+        "path": "/sale-mgt/budgetprediction/budgetUnion/3",
+        "params": {"optId": {"required": True}},
+    },
+    "get-requirement-list": {
+        "method": "GET",
+        "path": "/sale-project/needs/listPage",
+        "params": {
+            "requirementName": {"required": False},
+            "needsManager": {"required": False},
+            "productIds": {"required": False},
+            "projectId": {"required": False},
+            "priorityIds": {"required": False},
+            "queryType": {"required": True, "default": "0"},
+            "endTimeType": {"required": False},
+            "createTimeType": {"required": False},
+            "statuss": {"required": True, "default": "1,2"},
+            "projectIds": {"required": False},
+            "current": {"required": True, "default": "1"},
+            "size": {"required": True, "default": "10"},
+        },
+    },
     "get-finance-alert": {
         "method": "GET",
         "path": "/sale-mgt/budgetprediction/warning",
         "params": {"id": {"required": True}},
+    },
+    "get-project-doc-list": {
+        "method": "GET",
+        "path": "/sale-project/project/project-document-list/forSkills",
+        "params": {
+            "attachObj": {"required": True, "default": "21"},
+            "attachObjId": {"required": True},
+        },
     },
     "get-payment-plan": {
         "method": "GET",

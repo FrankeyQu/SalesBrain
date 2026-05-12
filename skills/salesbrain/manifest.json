@@ -1,0 +1,11 @@
+{
+  "name": "SalesBrain",
+  "slug": "salesbrain",
+  "version": "0.2.0",
+  "bundle_revision": "main",
+  "built_at": "",
+  "default_entry": "scripts/install.py",
+  "github_repo": "https://github.com/FrankeyQu/SalesBrain.git",
+  "github_branch": "main",
+  "update_priority": ["company_skillhub", "github"]
+}

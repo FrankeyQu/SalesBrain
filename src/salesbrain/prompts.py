@@ -45,11 +45,40 @@ RESPONSE_SCHEMA = {
     "workflow_items": [
         {
             "title": "string",
-            "pattern_type": "string",
+            "pattern_type": "followup|report|project|opportunity|product|collaboration|other",
             "summary": "string",
-            "example_json": {},
+            "example_json": {
+                "when_to_use": "string",
+                "steps": ["string"],
+                "signals": ["string"],
+                "avoid": ["string"],
+            },
             "source_task_ids_json": [],
             "sync_status": "local_only",
+        }
+    ],
+    "workflow_inbox_decisions": [
+        {
+            "id": "workflow_inbox_item_id",
+            "action": "accept|merge|ignore|duplicate",
+            "merged_item": {
+                "title": "optional merged title",
+                "pattern_type": "optional",
+                "summary": "optional",
+                "example_json": {},
+                "source_task_ids_json": [],
+                "sync_status": "ready",
+            },
+        }
+    ],
+    "next_wake_plans": [
+        {
+            "kind": "work_followup|morning_analysis|daily_report_review|weekly_summary|workflow_reflection|initial_analysis",
+            "due_at": "2026-05-12T14:30:00+08:00",
+            "reason": "string",
+            "priority": "normal",
+            "replace_existing": True,
+            "payload_json": {},
         }
     ],
     "cron_jobs_to_remove": ["cron_job_id"],
@@ -85,6 +114,8 @@ Rules:
 - If nothing needs action, return ok=true with empty arrays.
 - For cron migration, only mark business-user-task cron jobs for removal.
 - When you identify a useful working method, return it in workflow_items so SalesBrain can keep it locally.
+- When the current wake suggests another check-in later, return a next_wake_plans item with a concrete future due_at.
+- Prefer adaptive next wake planning over fixed daily slots whenever the business state is still active.
 - When you see a weak, vague, or stalled report, create a concrete follow-up task instead of only commenting on it.
 """.strip()
 
@@ -99,6 +130,23 @@ def build_initial_analysis_prompt(context: dict[str, Any]) -> str:
         + "- analyze the last 20 days of daily reports for concrete follow-up opportunities\n"
         + "- identify vague reports, stalled progress, and timelines that look unrealistic\n"
         + "- create tasks directly when a next action is clear\n"
+        + "- if the work should be checked again soon, return a next_wake_plans item with a concrete adaptive due_at instead of relying only on fixed slots\n"
+        + "- use migrated cron summary and team workflow inbox candidates when they help, but avoid duplicate workflow items\n"
+        + "- after analysis, mention in summary that the sales person can adjust analysis and follow-up times later\n"
+    )
+
+
+def build_first_cron_migration_prompt(context: dict[str, Any]) -> str:
+    prompt = _base_prompt("first-run Openclaw cron migration before baseline analysis", context)
+    return (
+        prompt
+        + "\n\nFocus:\n"
+        + "- first explain in summary why SalesBrain should migrate business cron jobs: Openclaw cron may miss runs after restarts, while SalesBrain is deterministic and records heartbeat, job status, and failures\n"
+        + "- inspect openclaw_cron_jobs and business_cron_candidates\n"
+        + "- respect migration_mode and selected_job_ids from the context; if migration_mode is selected, only migrate those selected jobs\n"
+        + "- only return cron_jobs_to_remove for clear sales/business follow-up cron jobs\n"
+        + "- never remove system health, backup, platform maintenance, GitHub update, or SalesBrain own jobs\n"
+        + "- when a removed cron contains useful business intent, preserve it as tasks_to_create or workflow_items\n"
     )
 
 
@@ -112,6 +160,7 @@ def build_morning_analysis_prompt(context: dict[str, Any]) -> str:
         + "- identify vague reports or weak progress and create concrete follow-up tasks\n"
         + "- identify unrealistic project timelines or stage delays and create concrete follow-up tasks\n"
         + "- use the EBOSS snapshot and pending tasks to decide what to do next\n"
+        + "- if the business state still needs another check-in, include next_wake_plans with a concrete adaptive due_at\n"
     )
 
 
@@ -120,10 +169,12 @@ def build_work_followup_prompt(context: dict[str, Any]) -> str:
     return (
         prompt
         + "\n\nFocus:\n"
-        + "- this is one of the daily follow-up wake-ups at 08:30, 13:30, or 19:30\n"
+        + "- this is an adaptive sales follow-up wake, not a fixed clock-driven reminder\n"
         + "- remind the sales person about concrete next actions that should be pushed now\n"
         + "- create or update tasks directly when a follow-up is needed\n"
         + "- prefer short, specific, execution-ready task titles\n"
+        + "- if the account still needs another touch, return a next_wake_plans item with a concrete future due_at\n"
+        + "- use the fixed daily anchor times only as fallback context, not as the primary schedule choice\n"
     )
 
 
@@ -136,6 +187,7 @@ def build_daily_report_review_prompt(context: dict[str, Any]) -> str:
         + "- note whether the report has clear next steps, real progress, and explicit follow-up items\n"
         + "- create tasks for missing follow-ups or stalled items\n"
         + "- give the human a concise review suggestion when the report is too vague or too optimistic\n"
+        + "- if the report suggests another check-in later, return next_wake_plans with a concrete due_at\n"
     )
 
 
@@ -149,6 +201,7 @@ def build_weekly_summary_prompt(context: dict[str, Any]) -> str:
         + "- create concrete tasks for next week without asking the sales person first\n"
         + "- identify priority changes, missing follow-ups, and stalled opportunities\n"
         + "- include reusable workflow_items for any useful working method you notice\n"
+        + "- if a next check-in should happen before the default weekly cadence, return next_wake_plans with a concrete due_at\n"
     )
 
 
@@ -182,7 +235,26 @@ def build_github_update_prompt(context: dict[str, Any]) -> str:
         prompt
         + "\n\nFocus:\n"
         + "- if the remote GitHub revision is newer than the installed revision, ask the user whether to update now\n"
+        + "- prefer the company SkillHub command named 安装 SalesBrain when it has the newest version\n"
+        + "- compare local_version, company_skillhub_version, and github_version when present\n"
+        + "- if GitHub is newer but SkillHub is not, recommend publishing or waiting for the company SkillHub package first\n"
         + "- keep the summary as the exact user-facing question when an update is available\n"
         + "- if already up to date, say so briefly in the summary\n"
         + "- do not create tasks unless an update workflow itself needs tracking\n"
+    )
+
+
+def build_workflow_inbox_review_prompt(context: dict[str, Any]) -> str:
+    prompt = _base_prompt("team workflow inbox user confirmation", context)
+    return (
+        prompt
+        + "\n\nFocus:\n"
+        + "- SalesBrain found team workflow items synced from peers and woke you proactively\n"
+        + "- you must ask the user whether to adopt, merge, ignore, or mark each candidate duplicate\n"
+        + "- before asking, briefly compare each candidate with existing workflow_items and explain likely duplicates\n"
+        + "- if the current context does not include an explicit user confirmation, return an empty workflow_inbox_decisions array\n"
+        + "- if the user has explicitly confirmed, return workflow_inbox_decisions: accept, merge, ignore, or duplicate\n"
+        + "- use merge when the team item is useful but overlaps with an existing local method\n"
+        + "- do not create normal sales reminder tasks in this wake\n"
+        + "- make summary a concise user-facing confirmation question\n"
     )

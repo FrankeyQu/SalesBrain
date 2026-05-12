@@ -1,0 +1,175 @@
+# SalesBrain 使用说明
+
+SalesBrain 是给 Openclaw 用的销售陪跑系统。它不是 AI 模型，而是一个确定性调度、状态保存和团队同步层。
+
+## 它会做什么
+
+- 首次安装后，先检查本地 SalesBrain 程序和配置
+- 读取 EBOSS API Key
+- 首次全量同步 EBOSS 项目、商机、日报和相关明细
+- 在首次整体分析前，先迁移 Openclaw 里的业务 cron
+- 之后每天按固定时间唤醒 Openclaw 做分析、跟进、日报审阅、周总结和方法沉淀
+- 发现 GitHub 或公司 SkillHub 有新版本时，提醒你选择更新
+- 在内网里发现其他销售节点，并同步可复用的方法和成员状态
+
+## 首次安装后会发生什么
+
+首次初始化完成时，SalesBrain 会按这个顺序执行：
+
+1. 检查本地程序与配置
+2. 读取 EBOSS API Key
+3. 同步 EBOSS 全量数据
+4. 检查并迁移 Openclaw 的业务定时任务
+5. 唤醒 Openclaw 做首次整体分析
+6. 启动长期调度与团队同步
+
+这几个步骤都会有进度提示。SalesBrain 不会静默跳过首次流程。
+
+## 首次使用步骤
+
+1. 在公司 SkillHub 上传或安装 `salesbrain.zip`。
+2. 安装后对 Openclaw 说：`初始化 SalesBrain`。
+3. Openclaw 会先执行 skill 包内的 GitHub 安装脚本：
+
+```bash
+python <skill_root>/scripts/install.py
+```
+
+4. 安装脚本会从 `https://github.com/FrankeyQu/SalesBrain.git` 拉取 `main` 分支到 `~/.openclaw/SalesBrain`，并执行本地 editable 安装。
+5. Openclaw 会提示填写 EBOSS API Key，并创建本地配置。
+6. Openclaw 会分步执行首次 EBOSS 全量同步、cron 检查迁移和首次整体分析。
+7. 首次完成后，长期调度和团队同步开始工作。
+
+首次安装要求能访问 GitHub。公司 SkillHub 只分发这个轻量 skill 包，不再在压缩包内携带 SalesBrain 源码。
+
+Openclaw 可以先读取安装步骤：
+
+```bash
+python <skill_root>/scripts/install.py --steps
+```
+
+也可以检查本地安装状态：
+
+```bash
+python <skill_root>/scripts/install.py --check
+```
+
+Openclaw 实际执行首次流程时，应使用这些分步命令：
+
+```bash
+salesbrain init --no-first-run --sales-name "张三" --eboss-api-key "<EBOSS_API_KEY>"
+salesbrain first-run sync
+salesbrain first-run cron-inspect
+salesbrain first-run cron-migrate --mode all
+salesbrain first-run analyze
+salesbrain daemon
+```
+
+`cron-inspect` 之后如果发现 Openclaw 遗留业务定时任务，需要先让用户选择：
+
+- 迁移：`salesbrain first-run cron-migrate --mode all`
+- 不迁移：`salesbrain first-run cron-migrate --mode none`
+- 选择性迁移：`salesbrain first-run cron-migrate --mode selected --job-id <job_id>`
+
+`first-run analyze` 会返回 `analysis_report.formatted_report`，Openclaw 应把它作为首次分析报告发送给销售。
+
+## 为什么要迁移 Openclaw cron
+
+SalesBrain 采用的是确定性程序调度。它会记录心跳、任务状态和失败情况，适合承接销售跟进、日报审阅、工作分析这类关键定时任务。
+
+Openclaw 的原生 cron 可能受进程重启、运行环境或执行丢失影响而漏跑，所以业务定时任务应该迁移到 SalesBrain。
+
+## 更新顺序
+
+优先级是：
+
+1. 公司 SkillHub 的 `安装 SalesBrain`
+2. GitHub 仓库 `FrankeyQu/SalesBrain`
+
+如果公司版本更新，就优先走公司更新；如果 GitHub 更快，就提示你两边对比后再决定。
+
+默认每天 09:00 检查更新。任何更新都必须先经过用户确认，不会静默覆盖本地代码。
+
+## 默认调度
+
+- 02:00：同步 EBOSS
+- 06:00：早间工作分析
+- 08:30、13:30、19:30：跟进督促兜底锚点
+- 22:00：日报审阅
+- 23:30：工作方法沉淀
+- 周五 17:30：周总结和下周计划
+- 每 5 分钟：扫描到期任务
+- 每 5 分钟：检查团队同步来的方法 inbox，发现新候选时唤醒 Openclaw 询问是否采纳
+- 每天 09:00：检查更新
+
+这些调度都由 SalesBrain 自己执行，不依赖 Openclaw cron。
+
+销售跟进的主节奏不是固定三次。Openclaw 每次分析后可以返回 `next_wake_plans`，SalesBrain 会把它保存成一次性 `planned_wake`，到点后再次唤醒 Openclaw。固定三次只是在没有明确动态计划时的兜底。
+
+## 团队同步规则
+
+团队只同步两类内容：
+
+- 成员表
+- 可复用的方法和工作套路
+
+不会同步：
+
+- 个人任务
+- 提醒
+- EBOSS 原始数据
+- API Key
+- 日报原文
+- 私有记忆
+
+团队方法会先进入本地 inbox，并做去重判断。SalesBrain 发现有新同步候选后，会主动唤醒 Openclaw 给销售发确认消息；只有销售明确确认后，Openclaw 才能返回 `accept` 或 `merge`，然后 SalesBrain 才会写入正式方法表。
+
+默认团队参数：
+
+- seed：`http://10.50.3.37:37611`
+- 扫描网段：`10.50.0.0/16`
+- team secret：`salesbrain-team-v1`
+- 发现顺序：seed、已知 peer、广播、扫描兜底
+
+## 常用命令
+
+```bash
+salesbrain init --sales-name "张三"
+salesbrain daemon
+salesbrain status
+salesbrain eboss sync
+salesbrain wake initial
+salesbrain wake morning
+salesbrain wake followup
+salesbrain wake review
+salesbrain wake weekly
+salesbrain wake workflow
+salesbrain team status
+salesbrain team peers
+salesbrain team announce
+salesbrain team sync
+```
+
+## 排障建议
+
+- 如果首次同步失败，先检查 EBOSS API Key、网络和 `salesbrain status` 里的 latest_sync。
+- 如果定时任务没执行，先看 `salesbrain status` 里的 first_run_state、scheduler_jobs 和 monitor_state。
+- 如果团队成员看不到，先执行 `salesbrain team status` 和 `salesbrain team sync`，确认 seed 或 peer 是否可达。
+- 如果 Openclaw 原有 cron 没迁移，检查 Openclaw bridge 的 cron list/remove 命令是否配置正确。
+- 如果更新提示异常，优先确认公司 SkillHub 中 `安装 SalesBrain` 是否已经发布最新包。
+
+## 你会看到的进度提示
+
+首次启动时，建议 Openclaw 明确告诉用户这些阶段：
+
+- 准备环境
+- 同步 EBOSS
+- 迁移 cron
+- 首次整体分析
+- 启动长期调度
+
+如果某一步失败，SalesBrain 会把错误写进本地状态，而不是直接吞掉。
+
+## 版本记录
+
+- `0.2.0`：改为轻量 skill 包，首次安装从 GitHub 拉取 SalesBrain 代码，支持团队发现、方法同步和首次 cron 迁移。

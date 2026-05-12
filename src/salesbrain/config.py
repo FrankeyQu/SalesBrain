@@ -59,6 +59,10 @@ def _parse_time_list(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
     return parsed or default
 
 
+def _parse_str_list(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
+    return _parse_time_list(value, default)
+
+
 @dataclass(slots=True)
 class SalesBrainConfig:
     home: Path
@@ -73,6 +77,12 @@ class SalesBrainConfig:
     eboss_timeout_seconds: int = 240
     eboss_page_size: int = 50
     eboss_max_pages: int = 20
+    eboss_first_full_sync: bool = True
+    eboss_full_sync_page_size: int = 100
+    eboss_full_sync_max_pages: int = 1000
+    eboss_daily_active_sync_max_pages: int = 300
+    eboss_detail_sync_concurrency: int = 6
+    eboss_detail_sync_timeout_seconds: int = 240
     openclaw_mode: str = "command"
     openclaw_wake_command: str = ""
     openclaw_cron_list_command: str = ""
@@ -102,7 +112,14 @@ class SalesBrainConfig:
     team_broadcast_port: int = 37610
     team_broadcast_interval_seconds: int = 30
     team_sync_interval_seconds: int = 60
-    team_secret: str = ""
+    team_secret: str = "salesbrain-team-v1"
+    team_seed_endpoints: tuple[str, ...] = ("http://10.50.3.37:37611",)
+    team_scan_cidrs: tuple[str, ...] = ("10.50.0.0/16",)
+    team_scan_enabled: bool = True
+    team_scan_interval_seconds: int = 1800
+    team_scan_concurrency: int = 32
+    team_peer_heartbeat_count: int = 2
+    company_skillhub_install_command: str = "安装 SalesBrain"
 
     def ensure_dirs(self) -> None:
         self.home.mkdir(parents=True, exist_ok=True)
@@ -123,6 +140,12 @@ class SalesBrainConfig:
             eboss_timeout_seconds=self.eboss_timeout_seconds,
             eboss_page_size=self.eboss_page_size,
             eboss_max_pages=self.eboss_max_pages,
+            eboss_first_full_sync=self.eboss_first_full_sync,
+            eboss_full_sync_page_size=self.eboss_full_sync_page_size,
+            eboss_full_sync_max_pages=self.eboss_full_sync_max_pages,
+            eboss_daily_active_sync_max_pages=self.eboss_daily_active_sync_max_pages,
+            eboss_detail_sync_concurrency=self.eboss_detail_sync_concurrency,
+            eboss_detail_sync_timeout_seconds=self.eboss_detail_sync_timeout_seconds,
             openclaw_mode=self.openclaw_mode,
             openclaw_wake_command=self.openclaw_wake_command,
             openclaw_cron_list_command=self.openclaw_cron_list_command,
@@ -153,6 +176,13 @@ class SalesBrainConfig:
             team_broadcast_interval_seconds=self.team_broadcast_interval_seconds,
             team_sync_interval_seconds=self.team_sync_interval_seconds,
             team_secret=self.team_secret,
+            team_seed_endpoints=tuple(self.team_seed_endpoints),
+            team_scan_cidrs=tuple(self.team_scan_cidrs),
+            team_scan_enabled=self.team_scan_enabled,
+            team_scan_interval_seconds=self.team_scan_interval_seconds,
+            team_scan_concurrency=self.team_scan_concurrency,
+            team_peer_heartbeat_count=self.team_peer_heartbeat_count,
+            company_skillhub_install_command=self.company_skillhub_install_command,
         )
 
 
@@ -207,6 +237,7 @@ def load_config(config_path: str | Path | None = None) -> SalesBrainConfig:
     github = data.get("github", {})
     runtime = data.get("runtime", {})
     team = data.get("team", {})
+    company = data.get("company", {})
 
     home_env = _env("SALESBRAIN_HOME")
     home = _expand(home_env) if home_env else _expand_from(runtime.get("home") or config_path.parent, config_dir)
@@ -253,6 +284,18 @@ def load_config(config_path: str | Path | None = None) -> SalesBrainConfig:
         eboss_timeout_seconds=_parse_int(_env("EBOSS_TIMEOUT_SECONDS") or eboss.get("timeout_seconds"), 240),
         eboss_page_size=_parse_int(_env("EBOSS_PAGE_SIZE") or eboss.get("page_size"), 50),
         eboss_max_pages=_parse_int(_env("EBOSS_MAX_PAGES") or eboss.get("max_pages"), 20),
+        eboss_first_full_sync=_parse_bool(_env("EBOSS_FIRST_FULL_SYNC") or eboss.get("first_full_sync"), True),
+        eboss_full_sync_page_size=_parse_int(_env("EBOSS_FULL_SYNC_PAGE_SIZE") or eboss.get("full_sync_page_size"), 100),
+        eboss_full_sync_max_pages=_parse_int(_env("EBOSS_FULL_SYNC_MAX_PAGES") or eboss.get("full_sync_max_pages"), 1000),
+        eboss_daily_active_sync_max_pages=_parse_int(
+            _env("EBOSS_DAILY_ACTIVE_SYNC_MAX_PAGES") or eboss.get("daily_active_sync_max_pages"),
+            300,
+        ),
+        eboss_detail_sync_concurrency=_parse_int(_env("EBOSS_DETAIL_SYNC_CONCURRENCY") or eboss.get("detail_sync_concurrency"), 6),
+        eboss_detail_sync_timeout_seconds=_parse_int(
+            _env("EBOSS_DETAIL_SYNC_TIMEOUT_SECONDS") or eboss.get("detail_sync_timeout_seconds"),
+            240,
+        ),
         openclaw_mode=_env("OPENCLAW_MODE") or str(openclaw.get("mode", "command")).strip() or "command",
         openclaw_wake_command=_env("OPENCLAW_WAKE_COMMAND") or str(openclaw.get("wake_command", "")).strip(),
         openclaw_cron_list_command=_env("OPENCLAW_CRON_LIST_COMMAND") or str(openclaw.get("cron_list_command", "")).strip(),
@@ -289,7 +332,22 @@ def load_config(config_path: str | Path | None = None) -> SalesBrainConfig:
         team_broadcast_port=_parse_int(_env("SALESBRAIN_TEAM_BROADCAST_PORT") or team.get("broadcast_port"), 37610),
         team_broadcast_interval_seconds=_parse_int(_env("SALESBRAIN_TEAM_BROADCAST_INTERVAL_SECONDS") or team.get("broadcast_interval_seconds"), 30),
         team_sync_interval_seconds=_parse_int(_env("SALESBRAIN_TEAM_SYNC_INTERVAL_SECONDS") or team.get("sync_interval_seconds"), 60),
-        team_secret=_env("SALESBRAIN_TEAM_SECRET") or str(team.get("secret", "")).strip(),
+        team_secret=_env("SALESBRAIN_TEAM_SECRET") or str(team.get("secret", "salesbrain-team-v1")).strip() or "salesbrain-team-v1",
+        team_seed_endpoints=_parse_str_list(
+            _env("SALESBRAIN_TEAM_SEED_ENDPOINTS") or team.get("seed_endpoints"),
+            ("http://10.50.3.37:37611",),
+        ),
+        team_scan_cidrs=_parse_str_list(
+            _env("SALESBRAIN_TEAM_SCAN_CIDRS") or team.get("scan_cidrs"),
+            ("10.50.0.0/16",),
+        ),
+        team_scan_enabled=_parse_bool(_env("SALESBRAIN_TEAM_SCAN_ENABLED") or team.get("scan_enabled"), True),
+        team_scan_interval_seconds=_parse_int(_env("SALESBRAIN_TEAM_SCAN_INTERVAL_SECONDS") or team.get("scan_interval_seconds"), 1800),
+        team_scan_concurrency=_parse_int(_env("SALESBRAIN_TEAM_SCAN_CONCURRENCY") or team.get("scan_concurrency"), 32),
+        team_peer_heartbeat_count=_parse_int(_env("SALESBRAIN_TEAM_PEER_HEARTBEAT_COUNT") or team.get("peer_heartbeat_count"), 2),
+        company_skillhub_install_command=_env("SALESBRAIN_COMPANY_SKILLHUB_INSTALL_COMMAND")
+        or str(company.get("skillhub_install_command", "安装 SalesBrain")).strip()
+        or "安装 SalesBrain",
     )
     return cfg.with_resolved_paths()
 
@@ -314,6 +372,12 @@ api_key_file = {str((target.parent / "secrets" / "eboss-api-key.txt").resolve())
 timeout_seconds = 240
 page_size = 50
 max_pages = 20
+first_full_sync = true
+full_sync_page_size = 100
+full_sync_max_pages = 1000
+daily_active_sync_max_pages = 300
+detail_sync_concurrency = 6
+detail_sync_timeout_seconds = 240
 
 [openclaw]
 mode = "command"
@@ -339,6 +403,9 @@ branch = "main"
 update_check_time = "09:00"
 timeout_seconds = 30
 
+[company]
+skillhub_install_command = "安装 SalesBrain"
+
 [team]
 enabled = true
 name = "SalesBrain"
@@ -351,7 +418,13 @@ broadcast_host = "255.255.255.255"
 broadcast_port = 37610
 broadcast_interval_seconds = 30
 sync_interval_seconds = 60
-secret = ""
+secret = "salesbrain-team-v1"
+seed_endpoints = ["http://10.50.3.37:37611"]
+scan_cidrs = ["10.50.0.0/16"]
+scan_enabled = true
+scan_interval_seconds = 1800
+scan_concurrency = 32
+peer_heartbeat_count = 2
 
 [runtime]
 home = {str(home)!r}
