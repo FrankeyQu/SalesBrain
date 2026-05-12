@@ -77,9 +77,9 @@ def _write_install_script(target: Path) -> None:
             },
             {
                 "id": 3,
-                "name": "首次全量同步 EBOSS 项目、商机、日报和关联数据",
+                "name": "首次全量同步 EBOSS 本年度项目、商机、日报和关联数据",
                 "command": "salesbrain first-run sync",
-                "progress": "⏳ 首次全量同步 EBOSS 数据...",
+                "progress": "⏳ 首次全量同步 EBOSS 本年度数据...",
                 "success": "✅ 完成",
                 "status": "required",
             },

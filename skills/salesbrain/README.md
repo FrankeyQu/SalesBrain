@@ -6,7 +6,7 @@ SalesBrain 是给 Openclaw 用的销售陪跑系统。它不是 AI 模型，而�
 
 - 首次安装后，先检查本地 SalesBrain 程序和配置
 - 读取 EBOSS API Key
-- 首次全量同步 EBOSS 项目、商机、日报和相关明细
+- 首次全量同步 EBOSS 本年度项目、商机、日报和相关明细
 - 在首次整体分析前，先迁移 Openclaw 里的业务 cron
 - 之后每天按固定时间唤醒 Openclaw 做分析、跟进、日报审阅、周总结和方法沉淀
 - 发现 GitHub 或公司 SkillHub 有新版本时，提醒你选择更新
@@ -18,7 +18,7 @@ SalesBrain 是给 Openclaw 用的销售陪跑系统。它不是 AI 模型，而�
 
 1. 检查本地程序与配置
 2. 读取 EBOSS API Key
-3. 同步 EBOSS 全量数据
+3. 同步 EBOSS 本年度全量数据
 4. 检查并迁移 Openclaw 的业务定时任务
 5. 唤醒 Openclaw 做首次整体分析
 6. 启动长期调度与团队同步
@@ -41,6 +41,8 @@ python <skill_root>/scripts/install.py
 7. 首次完成后，长期调度和团队同步开始工作。
 
 首次安装要求能访问 GitHub。公司 SkillHub 只分发这个轻量 skill 包，不再在压缩包内携带 SalesBrain 源码。
+
+EBOSS 同步默认只保留本年度数据。首次同步、手动全量同步和后续全量同步都会优先向 EBOSS 传入本年度时间范围，并在本地再次过滤；年初首次日报回填不会把上一年度日报写入本地库。
 
 Openclaw 可以先读取安装步骤：
 

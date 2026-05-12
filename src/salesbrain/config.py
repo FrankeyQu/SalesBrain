@@ -83,6 +83,7 @@ class SalesBrainConfig:
     eboss_daily_active_sync_max_pages: int = 300
     eboss_detail_sync_concurrency: int = 6
     eboss_detail_sync_timeout_seconds: int = 240
+    eboss_current_year_only: bool = True
     openclaw_mode: str = "command"
     openclaw_wake_command: str = ""
     openclaw_cron_list_command: str = ""
@@ -146,6 +147,7 @@ class SalesBrainConfig:
             eboss_daily_active_sync_max_pages=self.eboss_daily_active_sync_max_pages,
             eboss_detail_sync_concurrency=self.eboss_detail_sync_concurrency,
             eboss_detail_sync_timeout_seconds=self.eboss_detail_sync_timeout_seconds,
+            eboss_current_year_only=self.eboss_current_year_only,
             openclaw_mode=self.openclaw_mode,
             openclaw_wake_command=self.openclaw_wake_command,
             openclaw_cron_list_command=self.openclaw_cron_list_command,
@@ -296,6 +298,7 @@ def load_config(config_path: str | Path | None = None) -> SalesBrainConfig:
             _env("EBOSS_DETAIL_SYNC_TIMEOUT_SECONDS") or eboss.get("detail_sync_timeout_seconds"),
             240,
         ),
+        eboss_current_year_only=_parse_bool(_env("EBOSS_CURRENT_YEAR_ONLY") or eboss.get("current_year_only"), True),
         openclaw_mode=_env("OPENCLAW_MODE") or str(openclaw.get("mode", "command")).strip() or "command",
         openclaw_wake_command=_env("OPENCLAW_WAKE_COMMAND") or str(openclaw.get("wake_command", "")).strip(),
         openclaw_cron_list_command=_env("OPENCLAW_CRON_LIST_COMMAND") or str(openclaw.get("cron_list_command", "")).strip(),
@@ -378,6 +381,7 @@ full_sync_max_pages = 1000
 daily_active_sync_max_pages = 300
 detail_sync_concurrency = 6
 detail_sync_timeout_seconds = 240
+current_year_only = true
 
 [openclaw]
 mode = "command"

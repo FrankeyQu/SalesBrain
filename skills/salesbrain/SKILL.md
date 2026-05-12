@@ -125,7 +125,7 @@ salesbrain daemon
 SalesBrain 将开始首次初始化。接下来会完成：
 1. 检查本地 SalesBrain 程序和配置；
 2. 读取 EBOSS API Key；
-3. 首次全量同步 EBOSS 项目、商机、日报和关联数据；
+3. 首次全量同步 EBOSS 本年度项目、商机、日报和关联数据；
 4. 检查 Openclaw 现有业务定时任务，并迁移到 SalesBrain；
 5. 唤醒 Openclaw 做首次整体工作分析；
 6. 启动 SalesBrain 长期调度和团队同步。
@@ -136,7 +136,7 @@ SalesBrain 将开始首次初始化。接下来会完成：
 ```text
 [1/6] 正在检查本地 SalesBrain 程序...
 [2/6] 正在准备 EBOSS 配置...
-[3/6] 正在同步 EBOSS 全量数据...
+[3/6] 正在同步 EBOSS 本年度全量数据...
 [4/6] 正在检查 Openclaw cron 并询问是否迁移...
 [5/6] 正在进行首次整体分析并生成报告...
 [6/6] 正在启动长期调度...
@@ -157,6 +157,7 @@ SalesBrain 将开始首次初始化。接下来会完成：
 
 - 立即开始长期调度
 - 按固定时间同步 EBOSS
+- EBOSS 首次同步和后续全量同步默认只保留本年度数据
 - 唤醒 Openclaw 做晨间分析、跟进督促、日报审阅、周总结
 - 检查是否有新的 GitHub 或公司 SkillHub 更新
 - 维护内网团队节点和可复用方法同步

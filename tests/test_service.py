@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -71,6 +72,69 @@ class FakeEbossClient:
         return EbossResponse(api_id=api_id, status=200, raw=payload)
 
     def call_paginated(self, api_id: str, params: dict[str, object] | None = None, *, max_pages: int = 20):
+        return self.call(api_id, params).records
+
+
+class YearFilteredEbossClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def call(self, api_id: str, params: dict[str, object] | None = None) -> EbossResponse:
+        params = params or {}
+        self.calls.append((api_id, dict(params)))
+        if api_id == "get-user-by-name":
+            payload = {"data": {"records": [{"id": "u1", "realName": "Alice"}]}}
+        elif api_id == "get-daily-report-self":
+            query_date = str(params.get("queryDate"))
+            payload = {"data": {"queryDate": query_date, "content": f"daily report {query_date}"}}
+        else:
+            parent_id = str(params.get("id") or params.get("projectId") or params.get("taskObjId") or params.get("followObjId") or params.get("attachObjId") or params.get("optId") or api_id)
+            payload = {
+                "data": {
+                    "records": [
+                        {"id": f"{api_id}-current", "name": f"{api_id} current", "createTime": "2026-05-01 09:00:00", "parentId": parent_id},
+                        {"id": f"{api_id}-old", "name": f"{api_id} old", "createTime": "2025-12-31 09:00:00", "parentId": parent_id},
+                    ]
+                }
+            }
+        return EbossResponse(api_id=api_id, status=200, raw=payload)
+
+    def call_paginated(self, api_id: str, params: dict[str, object] | None = None, *, max_pages: int = 20):
+        params = params or {}
+        self.calls.append((api_id, dict(params)))
+        if api_id == "get-project-list":
+            return [
+                {
+                    "id": "p-current",
+                    "projectName": "Current Project",
+                    "createTime": "2026-02-01 10:00:00",
+                    "history": [
+                        {"year": "2025", "note": "old nested"},
+                        {"year": "2026", "note": "current nested"},
+                    ],
+                },
+                {"id": "p-old", "projectName": "Old Project", "createTime": "2025-11-01 10:00:00"},
+            ]
+        if api_id == "get-opportunity-list":
+            return [
+                {"id": "o-current", "optName": "Current Opportunity", "createTime": "2026-03-01 10:00:00"},
+                {"id": "o-old", "optName": "Old Opportunity", "createTime": "2025-11-01 10:00:00"},
+            ]
+        if api_id == "get-customer-list":
+            return [
+                {"id": "c-current", "custName": "Current Customer", "createTime": "2026-04-01 10:00:00"},
+                {"id": "c-old", "custName": "Old Customer", "createTime": "2025-04-01 10:00:00"},
+            ]
+        if api_id == "get-lead-list":
+            return [
+                {"id": "l-current", "leadName": "Current Lead", "createTime": "2026-04-02 10:00:00"},
+                {"id": "l-old", "leadName": "Old Lead", "createTime": "2025-04-02 10:00:00"},
+            ]
+        if api_id == "get-task-list":
+            return [
+                {"id": "t-current", "taskName": "Current Task", "planStartTime": "2026-04-03 10:00:00"},
+                {"id": "t-old", "taskName": "Old Task", "planStartTime": "2025-04-03 10:00:00"},
+            ]
         return self.call(api_id, params).records
 
 
@@ -303,6 +367,69 @@ def test_first_eboss_sync_fetches_project_and_opportunity_details(tmp_path, monk
         "opportunity_actual",
     ):
         assert service.store.count_raw_records(object_type) > 0
+    service.close()
+
+
+def test_full_eboss_sync_limits_business_records_to_current_year(tmp_path, monkeypatch):
+    monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
+    config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")
+    cfg = load_config(config_path)
+    eboss = YearFilteredEbossClient()
+    service = SalesBrainService(cfg, eboss_client=eboss, openclaw_adapter=DummyOpenClaw())
+    service.bootstrap()
+
+    result = service.sync_eboss(now=datetime(2026, 5, 11, 2, 0, tzinfo=ZoneInfo("Asia/Shanghai")), force_full=True)
+
+    assert result["ok"] is True
+    assert result["sync_year"] == 2026
+    assert service.store.count_raw_records("project") == 1
+    assert service.store.count_raw_records("opportunity") == 1
+    assert service.store.count_raw_records("customer") == 1
+    assert service.store.count_raw_records("lead") == 1
+    assert service.store.count_raw_records("eboss_task") == 1
+    assert service.store.count_raw_records("project_detail") == 1
+    assert service.store.count_raw_records("opportunity_follow_record") == 1
+    assert all(
+        "old" not in json.loads(record["payload_json"]).get("name", "").lower()
+        for record in service.store.latest_raw_records(limit=200)
+    )
+    assert not any(
+        api_id == "get-project-detail" and params.get("id") == "p-old"
+        for api_id, params in eboss.calls
+    )
+    assert any(
+        api_id == "get-project-list" and str(params.get("createTime", "")).startswith("2026-01-01")
+        for api_id, params in eboss.calls
+    )
+    assert any(
+        api_id == "get-customer-list" and str(params.get("createTime", "")).startswith("2026-01-01")
+        for api_id, params in eboss.calls
+    )
+    project_payload = json.loads(service.store.latest_raw_records_by_type("project", limit=1)[0]["payload_json"])
+    assert project_payload["history"] == [{"year": "2026", "note": "current nested"}]
+    service.close()
+
+
+def test_first_eboss_daily_report_backfill_skips_previous_year_days(tmp_path, monkeypatch):
+    monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
+    config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")
+    cfg = load_config(config_path)
+    eboss = FakeEbossClient()
+    service = SalesBrainService(cfg, eboss_client=eboss, openclaw_adapter=DummyOpenClaw())
+    service.bootstrap()
+
+    result = service.sync_eboss(now=datetime(2026, 1, 10, 2, 0, tzinfo=ZoneInfo("Asia/Shanghai")), force_full=True)
+
+    assert result["ok"] is True
+    assert service.store.count_raw_records("daily_report") == 10
+    query_dates = {
+        json.loads(record["payload_json"])["salesbrain_query_date"]
+        for record in service.store.latest_raw_records_by_type("daily_report", limit=20)
+    }
+    assert min(query_dates) == "2026-01-01"
+    assert max(query_dates) == "2026-01-10"
+    assert all(date.startswith("2026-") for date in query_dates)
+    assert service.store.get_state("eboss_daily_report_backfill_done") == "1"
     service.close()
 
 

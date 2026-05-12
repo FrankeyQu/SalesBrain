@@ -5,7 +5,8 @@ SalesBrain is a local-first scheduler and state layer for Openclaw-based sales m
 What it does:
 
 - syncs EBOSS data into SQLite
-- backfills the last 30 days of EBOSS daily reports on first successful sync
+- limits EBOSS full sync data to the current calendar year, including first sync and later full syncs
+- backfills the last 30 days of EBOSS daily reports on first successful sync, capped to the current calendar year
 - runs a first-use EBOSS sync and full Openclaw analysis during `salesbrain init`
 - tracks follow-up tasks, review suggestions, and workflow patterns
 - wakes Openclaw on deterministic schedules and lets each analysis return adaptive `next_wake_plans` for the next sales follow-up

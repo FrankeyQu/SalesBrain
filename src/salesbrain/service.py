@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -57,6 +58,27 @@ PLANNED_WAKE_KINDS = {
 }
 PLANNED_WAKE_MIN_DELAY_MINUTES = 1
 PLANNED_WAKE_RETRY_MINUTES = 5
+YEAR_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
+COMPACT_DATE_RE = re.compile(r"^(19\d{2}|20\d{2})\d{4}(?:\D|$)")
+DATE_LIKE_KEY_PARTS = (
+    "date",
+    "time",
+    "year",
+    "month",
+    "create",
+    "created",
+    "update",
+    "updated",
+    "assign",
+    "follow",
+    "start",
+    "end",
+    "finish",
+    "complete",
+    "plan",
+    "estimated",
+)
+DATE_KEY_EXCLUDE_SUFFIXES = ("id", "ids")
 
 
 def _loads(value: Any, default: Any) -> Any:
@@ -123,6 +145,107 @@ def _latest_iso(values: list[str | None]) -> str | None:
     if not parsed:
         return None
     return max(parsed).isoformat(timespec="seconds")
+
+
+def _year_range(now: datetime) -> dict[str, str]:
+    year = now.year
+    return {
+        "year": str(year),
+        "start_date": f"{year}-01-01",
+        "end_date": f"{year}-12-31",
+        "start_datetime": f"{year}-01-01 00:00:00",
+        "end_datetime": f"{year}-12-31 23:59:59",
+        "create_time": f"{year}-01-01 00:00:00,{year}-12-31 23:59:59",
+    }
+
+
+def _looks_like_date_key(key: str) -> bool:
+    text = str(key).strip().lower()
+    if not text or text.endswith(DATE_KEY_EXCLUDE_SUFFIXES):
+        return False
+    return any(part in text for part in DATE_LIKE_KEY_PARTS)
+
+
+def _years_from_date_value(value: Any) -> set[int]:
+    if value in (None, ""):
+        return set()
+    if isinstance(value, bool):
+        return set()
+    if isinstance(value, (int, float)):
+        number = int(value)
+        if 1900 <= number <= 2100:
+            return {number}
+        if 1_000_000_000_000 <= number <= 4_102_444_800_000:
+            try:
+                return {datetime.fromtimestamp(number / 1000).year}
+            except Exception:
+                return set()
+        if 1_000_000_000 <= number <= 4_102_444_800:
+            try:
+                return {datetime.fromtimestamp(number).year}
+            except Exception:
+                return set()
+        return set()
+    text = str(value).strip()
+    if not text:
+        return set()
+    compact_match = COMPACT_DATE_RE.match(text)
+    if compact_match:
+        return {int(compact_match.group(1))}
+    years = {int(match) for match in YEAR_RE.findall(text)}
+    if years:
+        return years
+    try:
+        return {parse_iso_datetime(text).year}
+    except Exception:
+        return set()
+
+
+def _record_date_years(value: Any, *, parent_key: str = "") -> set[int]:
+    years: set[int] = set()
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            key_text = str(key)
+            if _looks_like_date_key(key_text):
+                years.update(_years_from_date_value(nested))
+            if isinstance(nested, (dict, list)):
+                years.update(_record_date_years(nested, parent_key=key_text))
+        return years
+    if isinstance(value, list):
+        for item in value:
+            years.update(_record_date_years(item, parent_key=parent_key))
+        return years
+    if parent_key and _looks_like_date_key(parent_key):
+        years.update(_years_from_date_value(value))
+    return years
+
+
+def _record_matches_year(record: dict[str, Any], year: int, *, keep_without_date: bool = True) -> bool:
+    years = _record_date_years(record)
+    if not years:
+        return keep_without_date
+    return year in years
+
+
+def _prune_value_to_year(value: Any, year: int) -> Any:
+    if isinstance(value, list):
+        pruned: list[Any] = []
+        for item in value:
+            if isinstance(item, dict):
+                if _record_matches_year(item, year, keep_without_date=True):
+                    pruned.append(_prune_record_to_year(item, year))
+            elif isinstance(item, list):
+                pruned.append(_prune_value_to_year(item, year))
+            else:
+                pruned.append(item)
+        return pruned
+    if isinstance(value, dict):
+        return _prune_record_to_year(value, year)
+    return value
+
+
+def _prune_record_to_year(record: dict[str, Any], year: int) -> dict[str, Any]:
+    return {key: _prune_value_to_year(value, year) for key, value in record.items()}
 
 
 def _seconds_since(older_iso: str | None, newer: datetime) -> int | None:
@@ -929,6 +1052,33 @@ class SalesBrainService:
                 unique.append(record)
             return unique
 
+        sync_year = now.year
+        year_range = _year_range(now)
+
+        def filter_current_year(object_type: str, records: list[dict[str, Any]], *, keep_without_date: bool = True) -> list[dict[str, Any]]:
+            if not self.config.eboss_current_year_only:
+                return records
+            filtered = []
+            for record in records:
+                if _record_matches_year(record, sync_year, keep_without_date=keep_without_date):
+                    filtered.append(_prune_record_to_year(record, sync_year))
+            dropped = len(records) - len(filtered)
+            if dropped:
+                warnings.append(
+                    {
+                        "api_id": "year_filter",
+                        "object_type": object_type,
+                        "warning": f"filtered_out_non_current_year_records:{dropped}",
+                        "year": str(sync_year),
+                    }
+                )
+            return filtered
+
+        def with_year_create_time(params: dict[str, Any]) -> dict[str, Any]:
+            if not self.config.eboss_current_year_only:
+                return dict(params)
+            return {**params, "createTime": year_range["create_time"]}
+
         def fetch_paginated_variants(
             api_id: str,
             object_type: str,
@@ -969,6 +1119,7 @@ class SalesBrainService:
         ) -> None:
             try:
                 records = records_or_raw(api_id, params)
+                records = filter_current_year(object_type, records)
                 enriched = []
                 for record in records:
                     payload = dict(record)
@@ -1039,7 +1190,14 @@ class SalesBrainService:
             }
             for sheet in project_sheets
         ]
-        project_records = fetch_paginated_variants("get-project-list", "project", project_variants, max_pages=max_pages)
+        project_records = fetch_paginated_variants(
+            "get-project-list",
+            "project",
+            [with_year_create_time(params) for params in project_variants],
+            max_pages=max_pages,
+            fallback_variants=project_variants if self.config.eboss_current_year_only else None,
+        )
+        project_records = filter_current_year("project", project_records)
         insert("get-project-list", "project", project_records)
 
         opportunity_variants = [
@@ -1064,13 +1222,22 @@ class SalesBrainService:
             }
             for scope in opportunity_ranges
         ]
+        opportunity_primary = [with_year_create_time(params) for params in opportunity_variants]
+        opportunity_fallback_with_year = [with_year_create_time(params) for params in opportunity_fallback]
         opportunity_records = fetch_paginated_variants(
             "get-opportunity-list",
             "opportunity",
-            opportunity_variants,
+            opportunity_primary,
             max_pages=max_pages,
-            fallback_variants=opportunity_fallback if is_first_full else None,
+            fallback_variants=(
+                opportunity_fallback_with_year + opportunity_variants + opportunity_fallback
+                if is_first_full
+                else opportunity_variants
+                if self.config.eboss_current_year_only
+                else None
+            ),
         )
+        opportunity_records = filter_current_year("opportunity", opportunity_records)
         insert("get-opportunity-list", "opportunity", opportunity_records)
 
         successful = int(bool(project_records)) + int(bool(opportunity_records))
@@ -1113,7 +1280,22 @@ class SalesBrainService:
             ),
         ]:
             try:
-                records = client.call_paginated(api_id, params, max_pages=max_pages)
+                request_params = with_year_create_time(params) if api_id in {"get-customer-list", "get-lead-list"} else params
+                try:
+                    records = client.call_paginated(api_id, request_params, max_pages=max_pages)
+                except Exception:
+                    if request_params == params:
+                        raise
+                    warnings.append(
+                        {
+                            "api_id": api_id,
+                            "object_type": object_type,
+                            "warning": "year_params_failed_fallback_used",
+                            "year": str(sync_year),
+                        }
+                    )
+                    records = client.call_paginated(api_id, params, max_pages=max_pages)
+                records = filter_current_year(object_type, records)
                 insert(api_id, object_type, dedupe_records(records))
                 successful += 1
             except Exception as exc:
@@ -1166,10 +1348,14 @@ class SalesBrainService:
             errors.append({"api_id": "get-daily-report-self", "queryDate": today_query_date, "error": str(exc)})
 
         if self.store.get_state(GITHUB_BACKFILL_DONE_KEY) != "1":
+            attempted_backfill_days = 0
             backfill_errors = 0
             backfill_success = 0
             for offset in range(29, -1, -1):
                 query_date = (now - timedelta(days=offset)).date().isoformat()
+                if self.config.eboss_current_year_only and not query_date.startswith(f"{sync_year}-"):
+                    continue
+                attempted_backfill_days += 1
                 try:
                     response = client.call("get-daily-report-self", {"queryDate": query_date})
                     records = response.records
@@ -1183,7 +1369,7 @@ class SalesBrainService:
                 except Exception as exc:
                     backfill_errors += 1
                     errors.append({"api_id": "get-daily-report-self", "queryDate": query_date, "error": str(exc)})
-            if backfill_errors == 0 and backfill_success == 30:
+            if attempted_backfill_days and backfill_errors == 0 and backfill_success == attempted_backfill_days:
                 self.store.set_state(GITHUB_BACKFILL_DONE_KEY, "1", now_iso=self.now_iso(now))
 
         if is_first_full and not errors:
@@ -1207,6 +1393,8 @@ class SalesBrainService:
                 "user_id": user_id,
                 "real_name": real_name,
                 "sync_mode": sync_mode,
+                "sync_year": sync_year if self.config.eboss_current_year_only else None,
+                "year_range": year_range if self.config.eboss_current_year_only else None,
                 "project_count": len(project_records),
                 "opportunity_count": len(opportunity_records),
             },
@@ -1216,6 +1404,7 @@ class SalesBrainService:
             "run_id": run_id,
             "status": status,
             "sync_mode": sync_mode,
+            "sync_year": sync_year if self.config.eboss_current_year_only else None,
             "counts": counts,
             "errors": errors,
             "warnings": warnings,
