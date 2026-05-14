@@ -11,14 +11,15 @@ The company skill package is lightweight and does not carry the SalesBrain sourc
 When this skill is installed on a fresh machine, the first step is to fetch SalesBrain from GitHub before any analysis:
 
 1. Run `python <skill_root>/scripts/install.py`
-2. Run `salesbrain init --no-first-run --sales-name "<sales name>" --eboss-api-key "<key>"`
-3. Run `salesbrain first-run sync`
-4. Run `salesbrain first-run cron-inspect`, show the result, then ask whether to migrate, skip, or selectively migrate
-5. Run `salesbrain first-run cron-migrate --mode all|none|selected`
-6. Run `salesbrain first-run analyze` and send `analysis_report.formatted_report` to the user
-7. Start the long-running scheduler: `salesbrain daemon`
+2. Run `python3 -m salesbrain init --no-first-run --sales-name "<sales name>" --eboss-api-key "<key>"`
+3. Run `python3 -m salesbrain first-run sync`
+4. Run `python3 -m salesbrain first-run cron-inspect`, show the result, then ask whether to migrate, skip, or selectively migrate
+5. Run `python3 -m salesbrain first-run cron-migrate --mode all|none|selected`
+6. Run `python3 -m salesbrain first-run analyze` and send `analysis_report.formatted_report` to the user
+7. Install the Linux cron watchdog and start the scheduler: `python3 -m salesbrain service install --mode auto --start`
 
 `salesbrain daemon` also starts LAN team discovery and peer sync unless `--no-team` is passed.
+On Openclaw-hosted Docker containers, do not use Openclaw business cron to keep SalesBrain alive. The `service install` command registers a Linux system cron watchdog that runs `python3 -m salesbrain service ensure-running` every minute, repairs due jobs, and starts the daemon again if the process is gone.
 For the first install, GitHub is the source of code. For later update reminders, Openclaw should still compare the company SkillHub command `安装 SalesBrain` and GitHub `FrankeyQu/SalesBrain`.
 
 ## Wake command

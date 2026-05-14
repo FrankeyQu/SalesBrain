@@ -12,6 +12,17 @@ from typing import Any, Callable
 from .config import default_config_path, load_config, write_default_config
 from .scheduler import SalesBrainScheduler
 from .service import SalesBrainService
+from .service_manager import (
+    detect_environment,
+    ensure_running,
+    install_watchdog,
+    restart_daemon,
+    service_status,
+    start_daemon,
+    stop_daemon,
+    uninstall_watchdog,
+    write_service_scripts,
+)
 
 
 def _dump(data: Any) -> None:
@@ -157,6 +168,71 @@ def cmd_monitor(args: argparse.Namespace) -> dict[str, Any]:
         return service.monitor_scheduler(repair=not args.report_only)
 
     return _run_with_service(args.config, _run)
+
+
+def _load_service_config(config_path: str | None):
+    cfg = load_config(config_path)
+    cfg.ensure_dirs()
+    return cfg
+
+
+def cmd_service_status(args: argparse.Namespace) -> dict[str, Any]:
+    return service_status(_load_service_config(args.config))
+
+
+def cmd_service_env(args: argparse.Namespace) -> dict[str, Any]:
+    return {"ok": True, "environment": detect_environment()}
+
+
+def cmd_service_scripts(args: argparse.Namespace) -> dict[str, Any]:
+    cfg = _load_service_config(args.config)
+    if args.write:
+        scripts = write_service_scripts(cfg, no_team=args.no_team)
+    else:
+        from .service_manager import build_launcher_script, build_watchdog_script, service_paths
+
+        paths = service_paths(cfg)
+        scripts = {
+            "launcher_script": str(paths.launcher_script),
+            "watchdog_script": str(paths.watchdog_script),
+            "launcher_content": build_launcher_script(cfg, no_team=args.no_team),
+            "watchdog_content": build_watchdog_script(cfg, no_team=args.no_team),
+        }
+    return {"ok": True, "written": bool(args.write), "scripts": scripts}
+
+
+def cmd_service_start(args: argparse.Namespace) -> dict[str, Any]:
+    return start_daemon(_load_service_config(args.config), no_team=args.no_team, force=args.force)
+
+
+def cmd_service_stop(args: argparse.Namespace) -> dict[str, Any]:
+    return stop_daemon(_load_service_config(args.config))
+
+
+def cmd_service_restart(args: argparse.Namespace) -> dict[str, Any]:
+    return restart_daemon(_load_service_config(args.config), no_team=args.no_team)
+
+
+def cmd_service_ensure_running(args: argparse.Namespace) -> dict[str, Any]:
+    return ensure_running(
+        _load_service_config(args.config),
+        no_team=args.no_team,
+        restart_stale_after_seconds=args.restart_stale_after,
+    )
+
+
+def cmd_service_install(args: argparse.Namespace) -> dict[str, Any]:
+    return install_watchdog(
+        _load_service_config(args.config),
+        mode=args.mode,
+        dry_run=args.dry_run,
+        start=args.start,
+        no_team=args.no_team,
+    )
+
+
+def cmd_service_uninstall(args: argparse.Namespace) -> dict[str, Any]:
+    return uninstall_watchdog(_load_service_config(args.config), dry_run=args.dry_run)
 
 
 def cmd_wake(args: argparse.Namespace) -> dict[str, Any]:
@@ -331,6 +407,38 @@ def build_parser() -> argparse.ArgumentParser:
     monitor.add_argument("--strict", action="store_true", help="Exit non-zero when the monitor reports degradation")
     monitor.set_defaults(func=cmd_monitor)
 
+    service_cmd = sub.add_parser("service", parents=[common], help="Install and manage the SalesBrain daemon watchdog")
+    service_sub = service_cmd.add_subparsers(dest="service_command", required=True)
+    service_sub.add_parser("status", parents=[common], help="Show daemon pid, heartbeat, and watchdog paths").set_defaults(func=cmd_service_status)
+    service_sub.add_parser("env", parents=[common], help="Detect container/system service capabilities").set_defaults(func=cmd_service_env)
+    scripts_cmd = service_sub.add_parser("scripts", parents=[common], help="Print or write service launcher scripts")
+    scripts_cmd.add_argument("--write", action="store_true", help="Write scripts into the SalesBrain service directory")
+    scripts_cmd.add_argument("--no-team", action="store_true", help="Do not start LAN team runtime from daemon")
+    scripts_cmd.set_defaults(func=cmd_service_scripts)
+    start_cmd = service_sub.add_parser("start", parents=[common], help="Start daemon as a detached process")
+    start_cmd.add_argument("--force", action="store_true", help="Restart if a daemon is already running")
+    start_cmd.add_argument("--no-team", action="store_true", help="Do not start LAN team runtime from daemon")
+    start_cmd.set_defaults(func=cmd_service_start)
+    service_sub.add_parser("stop", parents=[common], help="Stop daemon started by SalesBrain").set_defaults(func=cmd_service_stop)
+    restart_cmd = service_sub.add_parser("restart", parents=[common], help="Restart daemon")
+    restart_cmd.add_argument("--no-team", action="store_true", help="Do not start LAN team runtime from daemon")
+    restart_cmd.set_defaults(func=cmd_service_restart)
+    ensure_cmd = service_sub.add_parser("ensure-running", parents=[common], help="Run monitor and start/restart daemon when needed")
+    ensure_cmd.add_argument("--quiet", action="store_true", help="Suppress successful JSON output for cron watchdogs")
+    ensure_cmd.add_argument("--no-team", action="store_true", help="Do not start LAN team runtime from daemon")
+    ensure_cmd.add_argument("--restart-stale-after", type=int, default=1800, help="Restart alive daemon only after heartbeat is stale this many seconds")
+    ensure_cmd.set_defaults(func=cmd_service_ensure_running)
+    install_cmd = service_sub.add_parser("install", parents=[common], help="Install cron watchdog and optionally start daemon")
+    install_cmd.add_argument("--mode", choices=["auto", "cron"], default="auto", help="Watchdog backend; auto currently selects Linux cron")
+    install_cmd.add_argument("--dry-run", action="store_true", help="Show scripts and crontab entry without changing the system")
+    install_cmd.add_argument("--start", dest="start", action="store_true", default=True, help="Start daemon after installing watchdog")
+    install_cmd.add_argument("--no-start", dest="start", action="store_false", help="Only install watchdog; do not start daemon")
+    install_cmd.add_argument("--no-team", action="store_true", help="Do not start LAN team runtime from daemon")
+    install_cmd.set_defaults(func=cmd_service_install)
+    uninstall_cmd = service_sub.add_parser("uninstall", parents=[common], help="Remove SalesBrain cron watchdog block")
+    uninstall_cmd.add_argument("--dry-run", action="store_true", help="Show resulting crontab without changing the system")
+    uninstall_cmd.set_defaults(func=cmd_service_uninstall)
+
     wake = sub.add_parser("wake", parents=[common], help="Wake Openclaw for a specific review pass")
     wake_sub = wake.add_subparsers(dest="kind", required=True)
     for kind in ("initial", "morning", "followup", "review", "weekly", "due", "workflow", "workflow-inbox", "update", "salesbrain-update"):
@@ -417,9 +525,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = args.func(args)
     except Exception as exc:  # pragma: no cover - exercised via CLI smoke checks
-        _dump({"ok": False, "error": type(exc).__name__, "message": str(exc)})
+        if not getattr(args, "quiet", False):
+            _dump({"ok": False, "error": type(exc).__name__, "message": str(exc)})
         return 1
-    _dump(result)
+    if not getattr(args, "quiet", False) or (isinstance(result, dict) and result.get("ok") is False):
+        _dump(result)
     if isinstance(result, dict) and result.get("ok") is False:
         return 1
     if getattr(args, "command", "") == "monitor" and getattr(args, "strict", False):

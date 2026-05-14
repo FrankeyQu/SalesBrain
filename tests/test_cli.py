@@ -115,6 +115,45 @@ def test_cli_monitor_command(tmp_path, monkeypatch, capsys):
     assert "health_level" in output
 
 
+def test_cli_service_install_dry_run_uses_linux_cron_watchdog(tmp_path, monkeypatch, capsys):
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
+
+    assert main(["--config", str(config_path), "service", "install", "--dry-run", "--no-start"]) == 0
+
+    output = capsys.readouterr().out
+    assert "salesbrain-watchdog.sh" in output
+    assert "service ensure-running" in output
+    assert '"mode": "cron"' in output
+    assert "crontab" in output
+
+
+def test_cli_service_scripts_can_be_rendered_without_writing(tmp_path, monkeypatch, capsys):
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
+
+    assert main(["--config", str(config_path), "service", "scripts", "--no-team"]) == 0
+
+    output = capsys.readouterr().out
+    assert "launcher_content" in output
+    assert "python" in output
+    assert "salesbrain" in output
+    assert "daemon" in output
+    assert "--no-team" in output
+
+
+def test_cli_service_status_reports_environment(tmp_path, monkeypatch, capsys):
+    config_path = tmp_path / "config.toml"
+    monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
+
+    assert main(["--config", str(config_path), "service", "status"]) == 0
+
+    output = capsys.readouterr().out
+    assert "running" in output
+    assert "heartbeat" in output
+    assert "environment" in output
+
+
 def test_cli_returns_nonzero_when_handler_reports_not_ok(tmp_path, monkeypatch, capsys):
     config_path = tmp_path / "config.toml"
     monkeypatch.setattr(

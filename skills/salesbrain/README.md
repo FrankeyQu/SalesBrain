@@ -38,7 +38,7 @@ python <skill_root>/scripts/install.py
 4. 安装脚本会从 `https://github.com/FrankeyQu/SalesBrain.git` 拉取 `main` 分支到 `~/.openclaw/SalesBrain`，并执行本地 editable 安装。
 5. Openclaw 会提示填写 EBOSS API Key，并创建本地配置。
 6. Openclaw 会分步执行首次 EBOSS 全量同步、cron 检查迁移和首次整体分析。
-7. 首次完成后，长期调度和团队同步开始工作。
+7. 首次完成后，Openclaw 执行 `python3 -m salesbrain service install --mode auto --start`，安装 Linux cron watchdog 并启动长期调度和团队同步。
 
 首次安装要求能访问 GitHub。公司 SkillHub 只分发这个轻量 skill 包，不再在压缩包内携带 SalesBrain 源码。
 
@@ -59,19 +59,19 @@ python <skill_root>/scripts/install.py --check
 Openclaw 实际执行首次流程时，应使用这些分步命令：
 
 ```bash
-salesbrain init --no-first-run --sales-name "张三" --eboss-api-key "<EBOSS_API_KEY>"
-salesbrain first-run sync
-salesbrain first-run cron-inspect
-salesbrain first-run cron-migrate --mode all
-salesbrain first-run analyze
-salesbrain daemon
+python3 -m salesbrain init --no-first-run --sales-name "张三" --eboss-api-key "<EBOSS_API_KEY>"
+python3 -m salesbrain first-run sync
+python3 -m salesbrain first-run cron-inspect
+python3 -m salesbrain first-run cron-migrate --mode all
+python3 -m salesbrain first-run analyze
+python3 -m salesbrain service install --mode auto --start
 ```
 
 `cron-inspect` 之后如果发现 Openclaw 遗留业务定时任务，需要先让用户选择：
 
-- 迁移：`salesbrain first-run cron-migrate --mode all`
-- 不迁移：`salesbrain first-run cron-migrate --mode none`
-- 选择性迁移：`salesbrain first-run cron-migrate --mode selected --job-id <job_id>`
+- 迁移：`python3 -m salesbrain first-run cron-migrate --mode all`
+- 不迁移：`python3 -m salesbrain first-run cron-migrate --mode none`
+- 选择性迁移：`python3 -m salesbrain first-run cron-migrate --mode selected --job-id <job_id>`
 
 `first-run analyze` 会返回 `analysis_report.formatted_report`，Openclaw 应把它作为首次分析报告发送给销售。
 
@@ -105,6 +105,8 @@ Openclaw 的原生 cron 可能受进程重启、运行环境或执行丢失影�
 - 每天 09:00：检查更新
 
 这些调度都由 SalesBrain 自己执行，不依赖 Openclaw cron。
+
+在 Openclaw 托管 Docker 容器里，SalesBrain 使用 Linux 系统 cron 安装 watchdog：每分钟运行一次 `python3 -m salesbrain service ensure-running`，检查 daemon 进程、心跳和逾期任务；daemon 停止时自动拉起，并先补跑到期任务。这个 cron 是容器里的系统 cron，不是 Openclaw 业务 cron。
 
 销售跟进的主节奏不是固定三次。Openclaw 每次分析后可以返回 `next_wake_plans`，SalesBrain 会把它保存成一次性 `planned_wake`，到点后再次唤醒 Openclaw。固定三次只是在没有明确动态计划时的兜底。
 
@@ -156,6 +158,7 @@ salesbrain team sync
 
 - 如果首次同步失败，先检查 EBOSS API Key、网络和 `salesbrain status` 里的 latest_sync。
 - 如果定时任务没执行，先看 `salesbrain status` 里的 first_run_state、scheduler_jobs 和 monitor_state。
+- 如果 daemon 停止，执行 `python3 -m salesbrain service status` 查看 pid、心跳和 watchdog 路径；执行 `python3 -m salesbrain service install --mode auto --start` 重新安装 Linux cron watchdog。
 - 如果团队成员看不到，先执行 `salesbrain team status` 和 `salesbrain team sync`，确认 seed 或 peer 是否可达。
 - 如果 Openclaw 原有 cron 没迁移，检查 Openclaw bridge 的 cron list/remove 命令是否配置正确。
 - 如果更新提示异常，优先确认公司 SkillHub 中 `安装 SalesBrain` 是否已经发布最新包。

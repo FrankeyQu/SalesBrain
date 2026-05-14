@@ -11,6 +11,7 @@ What it does:
 - tracks follow-up tasks, review suggestions, and workflow patterns
 - wakes Openclaw on deterministic schedules and lets each analysis return adaptive `next_wake_plans` for the next sales follow-up
 - can run a one-shot health monitor that repairs due jobs and records scheduler health
+- can install a Linux cron watchdog that keeps the SalesBrain daemon running in Openclaw Docker containers
 - applies Openclaw's structured decisions
 - can inspect Openclaw cron jobs and migrate business tasks into SalesBrain
 - checks company SkillHub first and GitHub second, then wakes Openclaw to ask before updating SalesBrain
@@ -25,8 +26,8 @@ The repo does not hardcode any specific Openclaw install path. The bridge comman
 
 ```bash
 python -m pip install -e .
-salesbrain init --sales-name "张三"
-salesbrain daemon
+python3 -m salesbrain init --sales-name "张三"
+python3 -m salesbrain service install --mode auto --start
 ```
 
 `salesbrain init` prompts for the EBOSS `api-key` value if it is not supplied by `--eboss-api-key` or `EBOSS_API_KEY`.
@@ -34,7 +35,7 @@ After writing the config it immediately runs the first-use flow: EBOSS full sync
 
 For company SkillHub distribution, build `dist/salesbrain.zip` and upload it. The zip is lightweight and does not include the SalesBrain source tree. Openclaw should first run `scripts/install.py` from the installed skill package, which clones or pulls `https://github.com/FrankeyQu/SalesBrain.git` into `~/.openclaw/SalesBrain` and installs it locally. `scripts/install.py --steps` returns the install plan for Openclaw progress display.
 
-For a visible first setup, Openclaw should use `salesbrain init --no-first-run`, then `salesbrain first-run sync`, `salesbrain first-run cron-inspect`, `salesbrain first-run cron-migrate`, and `salesbrain first-run analyze`. This keeps cron migration and the initial analysis report visible to the user.
+For a visible first setup, Openclaw should use `python3 -m salesbrain init --no-first-run`, then `python3 -m salesbrain first-run sync`, `python3 -m salesbrain first-run cron-inspect`, `python3 -m salesbrain first-run cron-migrate`, and `python3 -m salesbrain first-run analyze`. This keeps cron migration and the initial analysis report visible to the user.
 
 ## Adaptive follow-up
 
@@ -63,6 +64,9 @@ salesbrain wake weekly
 salesbrain wake due
 salesbrain wake workflow
 salesbrain monitor
+salesbrain service status
+salesbrain service install --mode auto --start
+salesbrain service ensure-running
 salesbrain github check
 salesbrain github mark-installed
 salesbrain tasks list
@@ -73,7 +77,7 @@ salesbrain team announce
 salesbrain team sync
 ```
 
-On Linux, the most stable pattern is to run `salesbrain monitor` on a fixed interval through your process manager or timer, and use `--strict` if you want unhealthy runs to return a non-zero exit code.
+On Openclaw Docker containers, the stable pattern is `python3 -m salesbrain service install --mode auto --start`. It writes launcher/watchdog scripts under the SalesBrain home directory, registers a Linux cron watchdog that runs `python3 -m salesbrain service ensure-running` every minute, and starts the daemon as a detached process. This is Linux system cron, not Openclaw business cron.
 `salesbrain daemon` starts both the local scheduler and the LAN team node by default. Use `salesbrain daemon --no-team` only when another process is already running `salesbrain team serve` on the same instance.
 
 ## LAN team sync
