@@ -1566,6 +1566,9 @@ class SalesBrainService:
             "records": _compact_records(self.store.search_raw_records(keyword, limit), limit),
         }
 
+    def repair_eboss_object_summaries(self, *, object_type: str | None = None, limit: int | None = None) -> dict[str, Any]:
+        return self.store.repair_raw_record_summaries(object_type=object_type, limit=limit)
+
     def _validate_task_payload(self, task: dict[str, Any]) -> None:
         if not str(task.get("title", "")).strip():
             raise ValueError("task.title is required")

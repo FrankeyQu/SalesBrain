@@ -158,6 +158,7 @@ SalesBrain 将开始首次初始化。接下来会完成：
 - 通过 `python3 -m salesbrain service install --mode auto --start` 安装 Linux cron watchdog，并立即开始长期调度
 - 按固定时间同步 EBOSS
 - EBOSS 首次同步和后续全量同步默认只保留本年度数据
+- 如果发现 EBOSS 本地记录的 `object_id` 或 `object_name` 为空，先执行 `python3 -m salesbrain eboss repair-summaries` 修复历史数据
 - 唤醒 Openclaw 做晨间分析、跟进督促、日报审阅、周总结
 - 检查是否有新的 GitHub 或公司 SkillHub 更新
 - 维护内网团队节点和可复用方法同步

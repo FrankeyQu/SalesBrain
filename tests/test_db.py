@@ -74,6 +74,48 @@ def test_latest_raw_records_by_type_uses_insert_order(tmp_path):
     store.close()
 
 
+def test_repair_raw_record_summaries_reads_nested_eboss_data(tmp_path):
+    store = SalesBrainStore(tmp_path / "salesbrain.sqlite")
+    store.init_schema()
+    run_id = store.insert_sync_run(run_type="eboss_sync", started_at="2026-05-11T02:00:00+08:00")
+    store.insert_raw_record(
+        sync_run_id=run_id,
+        api_id="get-opportunity-detail",
+        object_type="opportunity_detail",
+        object_id=None,
+        object_name=None,
+        payload={
+            "code": 200,
+            "success": True,
+            "data": {
+                "id": "4914",
+                "optName": "2026年宁夏联通全平台管控感知平台",
+                "customer": {"id": "c1"},
+            },
+        },
+        fetched_at="2026-05-11T02:00:00+08:00",
+    )
+
+    result = store.repair_raw_record_summaries(object_type="opportunity_detail")
+    records = store.latest_raw_records_by_type("opportunity_detail", limit=1)
+
+    assert result["repaired"] == 1
+    assert records[0]["object_id"] == "4914"
+    assert records[0]["object_name"] == "2026年宁夏联通全平台管控感知平台"
+    store.close()
+
+
+def test_get_state_tolerates_tuple_rows(tmp_path):
+    store = SalesBrainStore(tmp_path / "salesbrain.sqlite")
+    store.init_schema()
+    store.set_state("key", "value", now_iso="2026-05-11T02:00:00+08:00")
+
+    store.conn.row_factory = None
+
+    assert store.get_state("key") == "value"
+    store.close()
+
+
 def test_team_members_and_events_are_idempotent(tmp_path):
     store = SalesBrainStore(tmp_path / "salesbrain.sqlite")
     store.init_schema()

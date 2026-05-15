@@ -235,6 +235,43 @@ def rough_similarity(left: str, right: str) -> float:
     return len(left_chars & right_chars) / len(union)
 
 
+SUMMARY_ID_KEYS = ("id", "projectId", "optId", "opportunityId", "custId", "customerId", "leadId", "taskId")
+SUMMARY_NAME_KEYS = (
+    "name",
+    "projectName",
+    "optName",
+    "opportunityName",
+    "custName",
+    "customerName",
+    "leadName",
+    "taskName",
+    "title",
+)
+
+
+def _pick_first(record: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = record.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _summary_candidate(payload: dict[str, Any]) -> dict[str, Any]:
+    if _pick_first(payload, SUMMARY_ID_KEYS) or _pick_first(payload, SUMMARY_NAME_KEYS):
+        return payload
+    data = payload.get("data")
+    if isinstance(data, dict):
+        if _pick_first(data, SUMMARY_ID_KEYS) or _pick_first(data, SUMMARY_NAME_KEYS):
+            return data
+    return payload
+
+
+def extract_raw_record_summary(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+    candidate = _summary_candidate(payload)
+    return _pick_first(candidate, SUMMARY_ID_KEYS), _pick_first(candidate, SUMMARY_NAME_KEYS)
+
+
 class SalesBrainStore:
     def __init__(self, db_path: str | Path):
         self.path = Path(db_path)
@@ -464,27 +501,7 @@ class SalesBrainStore:
         inserted = 0
         with self.transaction():
             for record in records:
-                object_id = (
-                    record.get("id")
-                    or record.get("projectId")
-                    or record.get("optId")
-                    or record.get("opportunityId")
-                    or record.get("custId")
-                    or record.get("customerId")
-                    or record.get("leadId")
-                    or record.get("taskId")
-                )
-                object_name = (
-                    record.get("name")
-                    or record.get("projectName")
-                    or record.get("optName")
-                    or record.get("opportunityName")
-                    or record.get("custName")
-                    or record.get("customerName")
-                    or record.get("leadName")
-                    or record.get("taskName")
-                    or record.get("title")
-                )
+                object_id, object_name = extract_raw_record_summary(record)
                 self.conn.execute(
                     """
                     INSERT INTO eboss_raw_records
@@ -503,6 +520,48 @@ class SalesBrainStore:
                 )
                 inserted += 1
         return inserted
+
+    def repair_raw_record_summaries(self, *, object_type: str | None = None, limit: int | None = None) -> dict[str, Any]:
+        where = "WHERE (object_id IS NULL OR object_name IS NULL)"
+        params: list[Any] = []
+        if object_type:
+            where += " AND object_type = ?"
+            params.append(object_type)
+        sql = f"SELECT id, object_id, object_name, payload_json FROM eboss_raw_records {where} ORDER BY id ASC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        rows = self.conn.execute(sql, tuple(params)).fetchall()
+        scanned = 0
+        repaired = 0
+        skipped = 0
+        with self.transaction():
+            for row in rows:
+                scanned += 1
+                try:
+                    payload = json.loads(str(row["payload_json"] or "{}"))
+                except Exception:
+                    skipped += 1
+                    continue
+                if not isinstance(payload, dict):
+                    skipped += 1
+                    continue
+                object_id, object_name = extract_raw_record_summary(payload)
+                object_id = object_id or row["object_id"]
+                object_name = object_name or row["object_name"]
+                if object_id == row["object_id"] and object_name == row["object_name"]:
+                    skipped += 1
+                    continue
+                self.conn.execute(
+                    """
+                    UPDATE eboss_raw_records
+                    SET object_id = ?, object_name = ?
+                    WHERE id = ?
+                    """,
+                    (object_id, object_name, row["id"]),
+                )
+                repaired += 1
+        return {"ok": True, "scanned": scanned, "repaired": repaired, "skipped": skipped, "object_type": object_type}
 
     def latest_raw_records(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self.conn.execute(
@@ -1254,7 +1313,12 @@ class SalesBrainStore:
             "SELECT value FROM app_state WHERE key = ?",
             (key,),
         ).fetchone()
-        return None if row is None else str(row["value"])
+        if row is None:
+            return None
+        try:
+            return str(row["value"])
+        except (KeyError, IndexError, TypeError):
+            return str(row[0])
 
     def delete_state(self, key: str) -> None:
         with self.transaction():

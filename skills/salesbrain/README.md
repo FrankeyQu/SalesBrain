@@ -157,6 +157,7 @@ salesbrain team sync
 ## 排障建议
 
 - 如果首次同步失败，先检查 EBOSS API Key、网络和 `salesbrain status` 里的 latest_sync。
+- 如果 EBOSS 记录里 `object_id` 或 `object_name` 为空，执行 `python3 -m salesbrain eboss repair-summaries` 回填历史记录，再重新跑 `python3 -m salesbrain eboss sync --full`。
 - 如果定时任务没执行，先看 `salesbrain status` 里的 first_run_state、scheduler_jobs 和 monitor_state。
 - 如果 daemon 停止，执行 `python3 -m salesbrain service status` 查看 pid、心跳和 watchdog 路径；执行 `python3 -m salesbrain service install --mode auto --start` 重新安装 Linux cron watchdog。
 - 如果团队成员看不到，先执行 `salesbrain team status` 和 `salesbrain team sync`，确认 seed 或 peer 是否可达。

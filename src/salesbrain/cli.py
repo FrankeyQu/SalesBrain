@@ -294,6 +294,13 @@ def cmd_eboss_search(args: argparse.Namespace) -> dict[str, Any]:
     return _run_with_service(args.config, lambda service: service.search_eboss(args.keyword, limit=args.limit))
 
 
+def cmd_eboss_repair_summaries(args: argparse.Namespace) -> dict[str, Any]:
+    return _run_with_service(
+        args.config,
+        lambda service: service.repair_eboss_object_summaries(object_type=args.object_type, limit=args.limit),
+    )
+
+
 def cmd_tasks_list(args: argparse.Namespace) -> dict[str, Any]:
     return _run_with_service(args.config, lambda service: {"tasks": service.list_tasks(status=args.status, limit=args.limit)})
 
@@ -456,6 +463,10 @@ def build_parser() -> argparse.ArgumentParser:
     eboss_search.add_argument("keyword")
     eboss_search.add_argument("--limit", type=int, default=20)
     eboss_search.set_defaults(func=cmd_eboss_search)
+    eboss_repair = eboss_sub.add_parser("repair-summaries", parents=[common], help="Backfill object_id/object_name from EBOSS payload_json")
+    eboss_repair.add_argument("--object-type", default=None, help="Limit repair to one object_type")
+    eboss_repair.add_argument("--limit", type=int, default=None, help="Maximum rows to scan")
+    eboss_repair.set_defaults(func=cmd_eboss_repair_summaries)
 
     tasks = sub.add_parser("tasks", parents=[common], help="Follow-up task operations")
     tasks_sub = tasks.add_subparsers(dest="tasks_command", required=True)

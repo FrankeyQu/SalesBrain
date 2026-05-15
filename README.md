@@ -56,6 +56,7 @@ Then edit the Openclaw bridge commands in `config.toml`.
 ```bash
 salesbrain status
 salesbrain eboss sync
+salesbrain eboss repair-summaries
 salesbrain wake initial
 salesbrain wake morning
 salesbrain wake followup

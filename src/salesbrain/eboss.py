@@ -345,7 +345,10 @@ class EbossClient:
                 value = data.get(key)
                 if isinstance(value, list):
                     return [item for item in value if isinstance(item, dict)]
-            if all(isinstance(v, (str, int, float, bool)) or v is None for v in data.values()):
+            # Detail APIs often return a single object under data, and that
+            # object can contain nested dict/list fields. Treat it as one
+            # record after collection-shaped responses have been handled.
+            if data:
                 return [data]
         if isinstance(data, list):
             return [item for item in data if isinstance(item, dict)]
