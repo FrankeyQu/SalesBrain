@@ -26,16 +26,20 @@ The repo does not hardcode any specific Openclaw install path. The bridge comman
 
 ```bash
 python -m pip install -e .
-python3 -m salesbrain init --sales-name "张三"
+python3 -m salesbrain init --sales-name "张三" --openclaw-wake-command "<openclaw bridge wake command>"
+python3 -m salesbrain bridge doctor
+python3 -m salesbrain bridge test
 python3 -m salesbrain service install --mode auto --start
 ```
 
 `salesbrain init` prompts for the EBOSS `api-key` value if it is not supplied by `--eboss-api-key` or `EBOSS_API_KEY`.
 After writing the config it immediately runs the first-use flow: EBOSS full sync, Openclaw business cron migration, and then a full baseline analysis.
+The Openclaw wake bridge is mandatory for scheduled work. If `[openclaw].wake_command` is empty, SalesBrain now records the wake as failed instead of writing an outbox file and pretending success.
+Run `salesbrain bridge test` before enabling the daemon; it wakes Openclaw and requires the bridge to confirm that a visible user message was sent.
 
 For company SkillHub distribution, build `dist/salesbrain.zip` and upload it. The zip is lightweight and does not include the SalesBrain source tree. Openclaw should first run `scripts/install.py` from the installed skill package, which clones or pulls `https://github.com/FrankeyQu/SalesBrain.git` into `~/.openclaw/SalesBrain` and installs it locally. `scripts/install.py --steps` returns the install plan for Openclaw progress display.
 
-For a visible first setup, Openclaw should use `python3 -m salesbrain init --no-first-run`, then `python3 -m salesbrain first-run sync`, `python3 -m salesbrain first-run cron-inspect`, `python3 -m salesbrain first-run cron-migrate`, and `python3 -m salesbrain first-run analyze`. This keeps cron migration and the initial analysis report visible to the user.
+For a visible first setup, Openclaw should use `python3 -m salesbrain init --no-first-run`, then `python3 -m salesbrain bridge doctor`, `python3 -m salesbrain bridge test`, `python3 -m salesbrain first-run sync`, `python3 -m salesbrain first-run cron-inspect`, `python3 -m salesbrain first-run cron-migrate`, and `python3 -m salesbrain first-run analyze`. This keeps bridge verification, cron migration, and the initial analysis report visible to the user.
 
 ## Adaptive follow-up
 
@@ -64,6 +68,8 @@ salesbrain wake review
 salesbrain wake weekly
 salesbrain wake due
 salesbrain wake workflow
+salesbrain bridge doctor
+salesbrain bridge test
 salesbrain monitor
 salesbrain service status
 salesbrain service install --mode auto --start

@@ -11,12 +11,14 @@ The company skill package is lightweight and does not carry the SalesBrain sourc
 When this skill is installed on a fresh machine, the first step is to fetch SalesBrain from GitHub before any analysis:
 
 1. Run `python <skill_root>/scripts/install.py`
-2. Run `python3 -m salesbrain init --no-first-run --sales-name "<sales name>" --eboss-api-key "<key>"`
-3. Run `python3 -m salesbrain first-run sync`
-4. Run `python3 -m salesbrain first-run cron-inspect`, show the result, then ask whether to migrate, skip, or selectively migrate
-5. Run `python3 -m salesbrain first-run cron-migrate --mode all|none|selected`
-6. Run `python3 -m salesbrain first-run analyze` and send `analysis_report.formatted_report` to the user
-7. Install the Linux cron watchdog and start the scheduler: `python3 -m salesbrain service install --mode auto --start`
+2. Run `python3 -m salesbrain init --no-first-run --sales-name "<sales name>" --eboss-api-key "<key>" --openclaw-wake-command "<bridge command>"`
+3. Run `python3 -m salesbrain bridge doctor`; if it fails, fix `[openclaw].wake_command` before continuing
+4. Run `python3 -m salesbrain bridge test`; Openclaw must visibly send the test message and return `{"ok": true, "message_sent": true}`
+5. Run `python3 -m salesbrain first-run sync`
+6. Run `python3 -m salesbrain first-run cron-inspect`, show the result, then ask whether to migrate, skip, or selectively migrate
+7. Run `python3 -m salesbrain first-run cron-migrate --mode all|none|selected`
+8. Run `python3 -m salesbrain first-run analyze` and send `analysis_report.formatted_report` to the user
+9. Install the Linux cron watchdog and start the scheduler: `python3 -m salesbrain service install --mode auto --start`
 
 `salesbrain daemon` also starts LAN team discovery and peer sync unless `--no-team` is passed.
 On Openclaw-hosted Docker containers, do not use Openclaw business cron to keep SalesBrain alive. The `service install` command registers a Linux system cron watchdog that runs `python3 -m salesbrain service ensure-running` every minute, repairs due jobs, and starts the daemon again if the process is gone.
@@ -33,7 +35,23 @@ The command should:
 
 1. Read the JSON payload
 2. Wake the local Openclaw mentor runtime
-3. Return JSON on stdout
+3. Let Openclaw send any user-facing message when the wake kind requires a reminder, question, or report
+4. Return JSON on stdout
+
+The bridge command is mandatory in command mode. If `[openclaw].wake_command` or `OPENCLAW_WAKE_COMMAND` is empty, SalesBrain records scheduled wakes as failed. It no longer silently writes an outbox file and marks the job successful.
+
+Before enabling the daemon, run:
+
+```bash
+python3 -m salesbrain bridge doctor
+python3 -m salesbrain bridge test
+```
+
+`bridge test` uses wake kind `salesbrain_bridge_test`. The bridge must send a visible message to the current user and return:
+
+```json
+{"ok": true, "message_sent": true}
+```
 
 Common wake kinds:
 
@@ -46,6 +64,7 @@ Common wake kinds:
 - `workflow_reflection`: local method extraction and cron migration
 - `workflow_inbox_review`: review team workflow candidates before accepting them locally
 - `salesbrain_update_check`: ask whether to update SalesBrain, preferring company SkillHub before GitHub
+- `salesbrain_bridge_test`: visible bridge test; send the test message and return `message_sent: true`
 
 Recommended response shape:
 

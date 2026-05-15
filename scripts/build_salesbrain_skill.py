@@ -69,14 +69,23 @@ def _write_install_script(target: Path) -> None:
             },
             {
                 "id": 2,
-                "name": "读取 EBOSS API Key 并创建本地配置",
-                "command": "python3 -m salesbrain init --no-first-run --sales-name <销售姓名> --eboss-api-key <EBOSS_API_KEY>",
+                "name": "读取 EBOSS API Key、Openclaw 唤醒命令并创建本地配置",
+                "command": "python3 -m salesbrain init --no-first-run --sales-name <销售姓名> --eboss-api-key <EBOSS_API_KEY> --openclaw-wake-command <Openclaw 唤醒命令>",
                 "progress": "⏳ 读取 EBOSS API Key...",
                 "success": "✅ 完成（已配置）",
                 "status": "requires_user_input",
             },
             {
                 "id": 3,
+                "name": "验证 Openclaw 唤醒桥接和消息发送",
+                "doctor_command": "python3 -m salesbrain bridge doctor",
+                "test_command": "python3 -m salesbrain bridge test",
+                "progress": "⏳ 验证 Openclaw 唤醒和消息发送...",
+                "success": "✅ 完成（已确认 Openclaw 可被唤醒并能发消息）",
+                "status": "required",
+            },
+            {
+                "id": 4,
                 "name": "首次全量同步 EBOSS 本年度项目、商机、日报和关联数据",
                 "command": "python3 -m salesbrain first-run sync",
                 "progress": "⏳ 首次全量同步 EBOSS 本年度数据...",
@@ -84,7 +93,7 @@ def _write_install_script(target: Path) -> None:
                 "status": "required",
             },
             {
-                "id": 4,
+                "id": 5,
                 "name": "检查 Openclaw 业务定时任务并迁移到 SalesBrain",
                 "inspect_command": "python3 -m salesbrain first-run cron-inspect",
                 "migrate_all_command": "python3 -m salesbrain first-run cron-migrate --mode all",
@@ -95,7 +104,7 @@ def _write_install_script(target: Path) -> None:
                 "status": "requires_user_confirmation",
             },
             {
-                "id": 5,
+                "id": 6,
                 "name": "唤醒 Openclaw 做首次整体工作分析",
                 "command": "python3 -m salesbrain first-run analyze",
                 "progress": "⏳ 唤醒 Openclaw 做首次分析...",
@@ -104,7 +113,7 @@ def _write_install_script(target: Path) -> None:
                 "status": "required",
             },
             {
-                "id": 6,
+                "id": 7,
                 "name": "安装 SalesBrain Linux cron watchdog 并启动长期调度",
                 "command": "python3 -m salesbrain service install --mode auto --start",
                 "progress": "⏳ 安装 SalesBrain 保活 watchdog 并启动长期调度...",
@@ -122,9 +131,11 @@ def _write_install_script(target: Path) -> None:
                 "notes": [
                     "首次安装代码来自 GitHub，不从 skill zip 携带源码。",
                     "salesbrain init --no-first-run 只创建配置和本地表，不会静默执行迁移和分析。",
-                    "步骤 4 必须把 cron-inspect 结果展示给用户，并让用户选择迁移、不迁移或选择性迁移。",
-                    "步骤 5 必须单独执行 first-run analyze，并把 analysis_report.formatted_report 发给用户。",
-                    "步骤 6 使用 Linux cron watchdog 保活 SalesBrain daemon，不使用 Openclaw cron。",
+                    "步骤 3 必须先运行 bridge doctor/test，确认 Openclaw 能被唤醒且能给用户发送可见消息。",
+                    "如果 bridge test 没有返回 message_sent=true，不要启动 SalesBrain daemon。",
+                    "步骤 5 必须把 cron-inspect 结果展示给用户，并让用户选择迁移、不迁移或选择性迁移。",
+                    "步骤 6 必须单独执行 first-run analyze，并把 analysis_report.formatted_report 发给用户。",
+                    "步骤 7 使用 Linux cron watchdog 保活 SalesBrain daemon，不使用 Openclaw cron。",
                     "业务定时不要再交给 Openclaw cron，后续由 SalesBrain daemon 调度。",
                 ],
             }

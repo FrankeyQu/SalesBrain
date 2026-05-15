@@ -86,13 +86,17 @@ python <skill_root>/scripts/install.py --check
 首次初始化不要直接让 `salesbrain init` 静默跑完整 first_run。必须使用分步命令：
 
 ```bash
-python3 -m salesbrain init --no-first-run --sales-name "<销售姓名>" --eboss-api-key "<EBOSS_API_KEY>"
+python3 -m salesbrain init --no-first-run --sales-name "<销售姓名>" --eboss-api-key "<EBOSS_API_KEY>" --openclaw-wake-command "<Openclaw 唤醒命令>"
+python3 -m salesbrain bridge doctor
+python3 -m salesbrain bridge test
 python3 -m salesbrain first-run sync
 python3 -m salesbrain first-run cron-inspect
 python3 -m salesbrain first-run cron-migrate --mode all
 python3 -m salesbrain first-run analyze
 python3 -m salesbrain service install --mode auto --start
 ```
+
+`bridge doctor` 和 `bridge test` 是硬性步骤。SalesBrain 必须能通过真实命令唤醒 Openclaw，且 `bridge test` 必须让 Openclaw 给当前用户发送一条可见测试消息并返回 `message_sent: true`。如果 `[openclaw].wake_command` 为空，SalesBrain 会把后续定时唤醒记录为失败，不再退回 outbox 文件并假装成功。
 
 第 4 步必须先展示 `cron-inspect` 结果。如果发现遗留业务定时任务，要问用户：
 
@@ -125,21 +129,23 @@ python3 -m salesbrain service install --mode auto --start
 SalesBrain 将开始首次初始化。接下来会完成：
 1. 检查本地 SalesBrain 程序和配置；
 2. 读取 EBOSS API Key；
-3. 首次全量同步 EBOSS 本年度项目、商机、日报和关联数据；
-4. 检查 Openclaw 现有业务定时任务，并迁移到 SalesBrain；
-5. 唤醒 Openclaw 做首次整体工作分析；
-6. 安装 SalesBrain Linux cron watchdog，并启动长期调度和团队同步。
+3. 检查 Openclaw 唤醒桥接，并发送一条测试消息；
+4. 首次全量同步 EBOSS 本年度项目、商机、日报和关联数据；
+5. 检查 Openclaw 现有业务定时任务，并迁移到 SalesBrain；
+6. 唤醒 Openclaw 做首次整体工作分析；
+7. 安装 SalesBrain Linux cron watchdog，并启动长期调度和团队同步。
 ```
 
 建议的进度条样式：
 
 ```text
-[1/6] 正在检查本地 SalesBrain 程序...
-[2/6] 正在准备 EBOSS 配置...
-[3/6] 正在同步 EBOSS 本年度全量数据...
-[4/6] 正在检查 Openclaw cron 并询问是否迁移...
-[5/6] 正在进行首次整体分析并生成报告...
-[6/6] 正在安装 SalesBrain 保活 watchdog 并启动长期调度...
+[1/7] 正在检查本地 SalesBrain 程序...
+[2/7] 正在准备 EBOSS 配置...
+[3/7] 正在验证 Openclaw 唤醒和消息发送...
+[4/7] 正在同步 EBOSS 本年度全量数据...
+[5/7] 正在检查 Openclaw cron 并询问是否迁移...
+[6/7] 正在进行首次整体分析并生成报告...
+[7/7] 正在安装 SalesBrain 保活 watchdog 并启动长期调度...
 ```
 
 首次运行时要设置并检查这些状态：

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -89,6 +91,14 @@ def _run_command(command: str, payload: dict[str, Any], *, timeout: int) -> dict
     return {"ok": True, "data": parsed}
 
 
+def _command_program(command: str) -> str:
+    try:
+        parts = shlex.split(command, posix=os.name != "nt")
+    except ValueError:
+        return ""
+    return parts[0] if parts else ""
+
+
 def _parse_cron_jobs_from_data(data: Any) -> list[dict[str, Any]]:
     if isinstance(data, list):
         return [item for item in data if isinstance(item, dict)]
@@ -163,18 +173,78 @@ class OpenClawWakeResult:
         return ""
 
 
+class OpenClawBridgeError(RuntimeError):
+    pass
+
+
 class OpenClawAdapter:
     def __init__(self, config: SalesBrainConfig):
         self.config = config
+
+    def doctor(self) -> dict[str, Any]:
+        mode = str(self.config.openclaw_mode or "").strip() or "command"
+        wake_command = str(self.config.openclaw_wake_command or "").strip()
+        status: dict[str, Any] = {
+            "ok": True,
+            "mode": mode,
+            "wake_command_configured": bool(wake_command),
+            "wake_command": wake_command,
+            "can_wake_openclaw": False,
+            "can_confirm_message_delivery": False,
+            "errors": [],
+            "warnings": [],
+        }
+        if mode == "command":
+            if not wake_command:
+                status["ok"] = False
+                status["errors"].append("openclaw_wake_command_missing")
+                status["hint"] = (
+                    "Configure [openclaw].wake_command or OPENCLAW_WAKE_COMMAND. "
+                    "SalesBrain scheduled wakes will fail until a real Openclaw bridge command is configured."
+                )
+                return status
+            program = _command_program(wake_command)
+            status["program"] = program
+            if not program:
+                status["ok"] = False
+                status["errors"].append("openclaw_wake_command_parse_failed")
+                return status
+            if shutil.which(program) is None and not Path(program).exists():
+                status["warnings"].append("openclaw_wake_command_program_not_found_on_path")
+            status["can_wake_openclaw"] = True
+            status["can_confirm_message_delivery"] = True
+            return status
+        if mode == "file":
+            status["ok"] = False
+            status["warnings"].append("file_mode_only_writes_outbox_and_cannot_send_user_messages")
+            status["hint"] = (
+                "File mode is only a debugging fallback. Use command mode with a real Openclaw bridge "
+                "before enabling SalesBrain scheduled work."
+            )
+            return status
+        status["ok"] = False
+        status["errors"].append(f"unsupported_openclaw_mode: {mode}")
+        return status
 
     def wake(self, kind: str, payload: dict[str, Any]) -> OpenClawWakeResult:
         body = dict(payload)
         body["kind"] = kind
         body["salesbrain_home"] = str(self.config.home)
 
-        if self.config.openclaw_mode == "command" and self.config.openclaw_wake_command:
+        if self.config.openclaw_mode == "command":
+            if not self.config.openclaw_wake_command:
+                raise OpenClawBridgeError(
+                    "openclaw_wake_command_missing: configure [openclaw].wake_command or OPENCLAW_WAKE_COMMAND; "
+                    "SalesBrain cannot wake Openclaw or send user messages without a real bridge command"
+                )
             raw = _run_command(self.config.openclaw_wake_command, body, timeout=self.config.wake_timeout_seconds)
-            return OpenClawWakeResult(ok=bool(raw.get("ok", True)), raw=raw)
+            if raw.get("ok") is False:
+                return OpenClawWakeResult(ok=False, raw=raw)
+            raw.setdefault("delivery", "command")
+            return OpenClawWakeResult(ok=True, raw=raw)
+
+        if self.config.openclaw_mode != "file":
+            raise OpenClawBridgeError(f"unsupported_openclaw_mode: {self.config.openclaw_mode}")
 
         outbox = self.config.home / "outbox"
         outbox.mkdir(parents=True, exist_ok=True)

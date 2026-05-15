@@ -1,10 +1,37 @@
 from __future__ import annotations
 
 import json
+import pytest
 from dataclasses import replace
 
 from salesbrain.config import load_config, write_default_config
-from salesbrain.openclaw import OpenClawAdapter
+from salesbrain.openclaw import OpenClawAdapter, OpenClawBridgeError
+
+
+def test_command_mode_requires_real_wake_command(tmp_path):
+    config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")
+    cfg = load_config(config_path)
+    adapter = OpenClawAdapter(cfg)
+
+    doctor = adapter.doctor()
+    assert doctor["ok"] is False
+    assert "openclaw_wake_command_missing" in doctor["errors"]
+    with pytest.raises(OpenClawBridgeError, match="openclaw_wake_command_missing"):
+        adapter.wake("work_followup", {"run_id": "wake-1"})
+
+
+def test_explicit_file_mode_is_marked_as_non_messaging_fallback(tmp_path):
+    config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")
+    cfg = replace(load_config(config_path), openclaw_mode="file")
+    adapter = OpenClawAdapter(cfg)
+
+    doctor = adapter.doctor()
+    assert doctor["ok"] is False
+    assert "file_mode_only_writes_outbox_and_cannot_send_user_messages" in doctor["warnings"]
+
+    result = adapter.wake("manual", {"run_id": "wake-1"})
+    assert result.ok is True
+    assert result.raw["delivery"] == "file"
 
 
 def test_business_cron_detection_and_removal(tmp_path):

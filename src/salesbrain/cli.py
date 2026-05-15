@@ -92,6 +92,7 @@ def cmd_init(args: argparse.Namespace) -> dict[str, Any]:
         sales_name=sales_name,
         timezone=args.timezone,
         eboss_base_url=args.eboss_base_url,
+        openclaw_wake_command=args.openclaw_wake_command,
     )
     if eboss_api_key:
         secret_file = config_path.parent / "secrets" / "eboss-api-key.txt"
@@ -124,6 +125,7 @@ def cmd_status(args: argparse.Namespace) -> dict[str, Any]:
             "wake_runs": service.list_wake_runs(limit=20),
             "latest_sync": service.store.latest_sync_run(),
             "first_run_state": service.first_run_state(),
+            "openclaw_bridge": service.openclaw_bridge_doctor(),
         }
 
     return _run_with_service(args.config, _run)
@@ -260,6 +262,14 @@ def cmd_wake(args: argparse.Namespace) -> dict[str, Any]:
     return _run_with_service(args.config, _run)
 
 
+def cmd_bridge_doctor(args: argparse.Namespace) -> dict[str, Any]:
+    return _run_with_service(args.config, lambda service: service.openclaw_bridge_doctor(), bootstrap=False)
+
+
+def cmd_bridge_test(args: argparse.Namespace) -> dict[str, Any]:
+    return _run_with_service(args.config, lambda service: service.openclaw_bridge_test(), bootstrap=True)
+
+
 def cmd_eboss_sync(args: argparse.Namespace) -> dict[str, Any]:
     return _run_with_service(args.config, lambda service: service.sync_eboss(force_full=args.full))
 
@@ -394,6 +404,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--timezone", default="Asia/Shanghai", help="Timezone name")
     init.add_argument("--eboss-base-url", default="http://10.21.14.4:30010/api", help="EBOSS API base URL")
     init.add_argument("--eboss-api-key", default="", help="EBOSS api-key header value")
+    init.add_argument("--openclaw-wake-command", default="", help="Command used to wake Openclaw with SalesBrain JSON on stdin")
     init.add_argument("--force", action="store_true", help="Overwrite existing config")
     init.add_argument("--no-first-run", action="store_true", help="Only create config and bootstrap; do not sync/analyze yet")
     init.set_defaults(func=cmd_init)
@@ -450,6 +461,11 @@ def build_parser() -> argparse.ArgumentParser:
     wake_sub = wake.add_subparsers(dest="kind", required=True)
     for kind in ("initial", "morning", "followup", "review", "weekly", "due", "workflow", "workflow-inbox", "update", "salesbrain-update"):
         wake_sub.add_parser(kind, parents=[common], help=f"Run {kind} wake-up").set_defaults(func=cmd_wake, kind=kind)
+
+    bridge = sub.add_parser("bridge", parents=[common], help="Check and test the Openclaw wake/message bridge")
+    bridge_sub = bridge.add_subparsers(dest="bridge_command", required=True)
+    bridge_sub.add_parser("doctor", parents=[common], help="Validate Openclaw wake bridge configuration").set_defaults(func=cmd_bridge_doctor)
+    bridge_sub.add_parser("test", parents=[common], help="Wake Openclaw and require a visible test message").set_defaults(func=cmd_bridge_test)
 
     eboss = sub.add_parser("eboss", parents=[common], help="EBOSS operations")
     eboss_sub = eboss.add_subparsers(dest="eboss_command", required=True)

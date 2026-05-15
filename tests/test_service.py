@@ -261,6 +261,22 @@ def test_morning_analysis_creates_updates_and_reflects(tmp_path, monkeypatch):
     service.close()
 
 
+def test_missing_openclaw_bridge_fails_wake_run_instead_of_file_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
+    config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")
+    cfg = load_config(config_path)
+    service = SalesBrainService(cfg)
+    service.bootstrap()
+
+    result = service.morning_analysis(now=datetime(2026, 5, 11, 6, 0, tzinfo=ZoneInfo("Asia/Shanghai")))
+
+    assert result["ok"] is False
+    assert "openclaw_wake_command_missing" in result["error"]
+    assert result["wake_run"]["status"] == "failed"
+    assert not (cfg.home / "outbox").exists()
+    service.close()
+
+
 def test_next_wake_plan_schedules_adaptive_planned_wake(tmp_path, monkeypatch):
     monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
     config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")

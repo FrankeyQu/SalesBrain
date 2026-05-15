@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import sys
 from types import SimpleNamespace
 
 from salesbrain.github import GitHubCommitInfo
 from salesbrain.cli import main
+from salesbrain.config import write_default_config
 
 
 def _fake_commit() -> GitHubCommitInfo:
@@ -152,6 +154,32 @@ def test_cli_service_status_reports_environment(tmp_path, monkeypatch, capsys):
     assert "running" in output
     assert "heartbeat" in output
     assert "environment" in output
+
+
+def test_cli_bridge_doctor_fails_without_wake_command(tmp_path, capsys):
+    config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")
+
+    assert main(["--config", str(config_path), "bridge", "doctor"]) == 1
+    output = capsys.readouterr().out
+    assert "openclaw_wake_command_missing" in output
+
+
+def test_cli_bridge_test_requires_message_confirmation(tmp_path, monkeypatch, capsys):
+    bridge_script = tmp_path / "bridge.py"
+    bridge_script.write_text(
+        "import json, sys\n"
+        "json.load(sys.stdin)\n"
+        "print(json.dumps({'ok': True, 'message_sent': True, 'summary': 'sent'}))\n",
+        encoding="utf-8",
+    )
+    command = f'"{sys.executable}" "{bridge_script}"'
+    config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice", openclaw_wake_command=command)
+    monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
+
+    assert main(["--config", str(config_path), "bridge", "test"]) == 0
+    output = capsys.readouterr().out
+    assert '"message_sent": true' in output
+    assert "salesbrain_bridge_test" in output
 
 
 def test_cli_returns_nonzero_when_handler_reports_not_ok(tmp_path, monkeypatch, capsys):

@@ -6,6 +6,7 @@ SalesBrain 是给 Openclaw 用的销售陪跑系统。它不是 AI 模型，而�
 
 - 首次安装后，先检查本地 SalesBrain 程序和配置
 - 读取 EBOSS API Key
+- 验证 Openclaw 唤醒桥接，并发送一条可见测试消息
 - 首次全量同步 EBOSS 本年度项目、商机、日报和相关明细
 - 在首次整体分析前，先迁移 Openclaw 里的业务 cron
 - 之后每天按固定时间唤醒 Openclaw 做分析、跟进、日报审阅、周总结和方法沉淀
@@ -18,10 +19,11 @@ SalesBrain 是给 Openclaw 用的销售陪跑系统。它不是 AI 模型，而�
 
 1. 检查本地程序与配置
 2. 读取 EBOSS API Key
-3. 同步 EBOSS 本年度全量数据
-4. 检查并迁移 Openclaw 的业务定时任务
-5. 唤醒 Openclaw 做首次整体分析
-6. 启动长期调度与团队同步
+3. 验证 Openclaw 唤醒桥接和消息发送
+4. 同步 EBOSS 本年度全量数据
+5. 检查并迁移 Openclaw 的业务定时任务
+6. 唤醒 Openclaw 做首次整体分析
+7. 启动长期调度与团队同步
 
 这几个步骤都会有进度提示。SalesBrain 不会静默跳过首次流程。
 
@@ -37,8 +39,9 @@ python <skill_root>/scripts/install.py
 
 4. 安装脚本会从 `https://github.com/FrankeyQu/SalesBrain.git` 拉取 `main` 分支到 `~/.openclaw/SalesBrain`，并执行本地 editable 安装。
 5. Openclaw 会提示填写 EBOSS API Key，并创建本地配置。
-6. Openclaw 会分步执行首次 EBOSS 全量同步、cron 检查迁移和首次整体分析。
-7. 首次完成后，Openclaw 执行 `python3 -m salesbrain service install --mode auto --start`，安装 Linux cron watchdog 并启动长期调度和团队同步。
+6. Openclaw 会先执行 `python3 -m salesbrain bridge doctor` 和 `python3 -m salesbrain bridge test`，确认 SalesBrain 能唤醒 Openclaw 且 Openclaw 能向用户发出可见消息。
+7. Openclaw 会分步执行首次 EBOSS 全量同步、cron 检查迁移和首次整体分析。
+8. 首次完成后，Openclaw 执行 `python3 -m salesbrain service install --mode auto --start`，安装 Linux cron watchdog 并启动长期调度和团队同步。
 
 首次安装要求能访问 GitHub。公司 SkillHub 只分发这个轻量 skill 包，不再在压缩包内携带 SalesBrain 源码。
 
@@ -59,7 +62,9 @@ python <skill_root>/scripts/install.py --check
 Openclaw 实际执行首次流程时，应使用这些分步命令：
 
 ```bash
-python3 -m salesbrain init --no-first-run --sales-name "张三" --eboss-api-key "<EBOSS_API_KEY>"
+python3 -m salesbrain init --no-first-run --sales-name "张三" --eboss-api-key "<EBOSS_API_KEY>" --openclaw-wake-command "<Openclaw 唤醒命令>"
+python3 -m salesbrain bridge doctor
+python3 -m salesbrain bridge test
 python3 -m salesbrain first-run sync
 python3 -m salesbrain first-run cron-inspect
 python3 -m salesbrain first-run cron-migrate --mode all
@@ -74,6 +79,8 @@ python3 -m salesbrain service install --mode auto --start
 - 选择性迁移：`python3 -m salesbrain first-run cron-migrate --mode selected --job-id <job_id>`
 
 `first-run analyze` 会返回 `analysis_report.formatted_report`，Openclaw 应把它作为首次分析报告发送给销售。
+
+如果 `[openclaw].wake_command` 为空，SalesBrain 会把定时唤醒记录为失败，不再写 outbox 文件并标记成功。`bridge test` 必须让 Openclaw 发送一条可见测试消息，并返回 `message_sent: true`。
 
 ## 为什么要迁移 Openclaw cron
 
@@ -142,6 +149,8 @@ salesbrain init --sales-name "张三"
 salesbrain daemon
 salesbrain status
 salesbrain eboss sync
+salesbrain bridge doctor
+salesbrain bridge test
 salesbrain wake initial
 salesbrain wake morning
 salesbrain wake followup
@@ -159,6 +168,7 @@ salesbrain team sync
 - 如果首次同步失败，先检查 EBOSS API Key、网络和 `salesbrain status` 里的 latest_sync。
 - 如果 EBOSS 记录里 `object_id` 或 `object_name` 为空，执行 `python3 -m salesbrain eboss repair-summaries` 回填历史记录，再重新跑 `python3 -m salesbrain eboss sync --full`。
 - 如果定时任务没执行，先看 `salesbrain status` 里的 first_run_state、scheduler_jobs 和 monitor_state。
+- 如果定时任务显示执行但用户没收到消息，先执行 `python3 -m salesbrain bridge doctor` 和 `python3 -m salesbrain bridge test`。桥接未通过时，不要启动 daemon。
 - 如果 daemon 停止，执行 `python3 -m salesbrain service status` 查看 pid、心跳和 watchdog 路径；执行 `python3 -m salesbrain service install --mode auto --start` 重新安装 Linux cron watchdog。
 - 如果团队成员看不到，先执行 `salesbrain team status` 和 `salesbrain team sync`，确认 seed 或 peer 是否可达。
 - 如果 Openclaw 原有 cron 没迁移，检查 Openclaw bridge 的 cron list/remove 命令是否配置正确。

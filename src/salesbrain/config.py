@@ -361,6 +361,7 @@ def write_default_config(
     sales_name: str,
     timezone: str = "Asia/Shanghai",
     eboss_base_url: str = "http://10.21.14.4:30010/api",
+    openclaw_wake_command: str = "",
 ) -> Path:
     target = _expand(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -385,7 +386,7 @@ current_year_only = true
 
 [openclaw]
 mode = "command"
-wake_command = ""
+wake_command = {openclaw_wake_command!r}
 cron_list_command = ""
 cron_remove_command = ""
 cron_jobs_path = {str((home / "cron" / "jobs.json").resolve())!r}

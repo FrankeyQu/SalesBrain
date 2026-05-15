@@ -900,6 +900,73 @@ class SalesBrainService:
             "team_state": self.team().status() if self.config.team_enabled else {"enabled": False},
         }
 
+    def openclaw_bridge_doctor(self) -> dict[str, Any]:
+        doctor = getattr(self.openclaw, "doctor", None)
+        if callable(doctor):
+            return doctor()
+        return {
+            "ok": True,
+            "mode": "custom_adapter",
+            "can_wake_openclaw": True,
+            "can_confirm_message_delivery": False,
+            "warnings": ["custom_openclaw_adapter_has_no_doctor_method"],
+            "errors": [],
+        }
+
+    def openclaw_bridge_test(self, *, now: datetime | None = None) -> dict[str, Any]:
+        doctor = self.openclaw_bridge_doctor()
+        if not doctor.get("ok"):
+            return {
+                "ok": False,
+                "bridge": doctor,
+                "error": "openclaw_bridge_not_ready",
+            }
+        now = now or now_in_zone(self.config.timezone)
+        prompt = (
+            "SalesBrain 正在做 Openclaw 唤醒和消息发送测试。"
+            "请立刻向当前用户发送一条可见消息：SalesBrain 唤醒测试成功。"
+            "然后只返回 JSON，必须包含 {\"ok\": true, \"message_sent\": true}。"
+        )
+        context = {
+            "run_mode": "salesbrain_bridge_test",
+            "requires_visible_user_message": True,
+            "expected_user_message": "SalesBrain 唤醒测试成功",
+            "expected_json_fields": ["ok", "message_sent"],
+        }
+        result = self._wake_openclaw(
+            kind="salesbrain_bridge_test",
+            prompt=prompt,
+            context=context,
+            now=now,
+        )
+        raw = result.get("openclaw_result") if isinstance(result, dict) else {}
+        message_sent = bool(raw.get("message_sent")) if isinstance(raw, dict) else False
+        if result.get("ok") and message_sent:
+            result["bridge"] = doctor
+            result["message_sent"] = True
+            return result
+        wake_run = result.get("wake_run") if isinstance(result, dict) else None
+        if isinstance(wake_run, dict) and wake_run.get("id"):
+            updated = self.store.update_wake_run(
+                str(wake_run["id"]),
+                {
+                    "finished_at": self.now_iso(),
+                    "status": "failed",
+                    "error": "bridge_test_message_not_confirmed",
+                    "payload_json": {
+                        "openclaw_result": raw,
+                        "bridge": doctor,
+                        "message_sent": message_sent,
+                    },
+                },
+            )
+            result["wake_run"] = _decode_json_columns(updated or wake_run)
+        result["ok"] = False
+        result["bridge"] = doctor
+        result["message_sent"] = False
+        result["error"] = result.get("error") or "bridge_test_message_not_confirmed"
+        return result
+
     def get_github_state(self) -> dict[str, Any]:
         return {
             "repo": self.config.github_repo,
