@@ -72,6 +72,9 @@ Recommended response shape:
 {
   "ok": true,
   "summary": "short result",
+  "user_message": "导师助理发给销售的完整消息：先分析当前工作状态，再说明现在该做什么、为什么、下一次什么时候检查。",
+  "analysis_summary": "本次判断依据，引用 business_facts / work_state 中的对象 ID、金额、阶段和跟进状态。",
+  "message_sent": true,
   "tasks_to_create": [],
   "tasks_to_update": [],
   "review_suggestions": [],
@@ -91,6 +94,16 @@ Recommended response shape:
   "cron_jobs_to_keep": []
 }
 ```
+
+For all user-facing wakes, `user_message` and `message_sent=true` are required. SalesBrain marks the wake as failed if Openclaw only returns tasks but does not confirm that the mentor message was sent.
+
+SalesBrain now sends a semantic data layer in the context:
+
+- `semantic_contract`: rules for using IDs, amounts, and confidence
+- `business_facts`: standardized EBOSS objects with `object_type`, `object_id`, `name`, `amount_yuan`, `amount_display`, `amount_source`, `amount_confidence`, `stage`, and `last_follow_at`
+- `work_state`: curated current-state lists such as high-value opportunities, stale objects, and amount conflicts
+
+Use `business_facts` as the source of truth. Do not infer opportunity or project amounts from raw EBOSS payloads. If a task refers to an EBOSS object, return the exact `source_type` and `source_ref`; when a task mentions an amount, include `amount_yuan_used`.
 
 For `salesbrain_update_check`, the `summary` should be a direct question asking the user whether to update SalesBrain. The bridge must not update code without user confirmation.
 For normal sales analysis wakes, Openclaw should create or update tasks directly in JSON and should not ask the sales person for confirmation first.

@@ -9,6 +9,7 @@ from typing import Any
 from .config import SalesBrainConfig
 from .db import SalesBrainStore
 from .eboss import EbossClient
+from .facts import BUSINESS_OBJECT_TYPES, build_business_fact_package, fact_index_from_context, parse_amount_yuan
 from .github import compare_commit_ids, fetch_remote_commit
 from .openclaw import OpenClawAdapter
 from .prompts import (
@@ -58,6 +59,16 @@ PLANNED_WAKE_KINDS = {
 }
 PLANNED_WAKE_MIN_DELAY_MINUTES = 1
 PLANNED_WAKE_RETRY_MINUTES = 5
+MENTOR_MESSAGE_REQUIRED_WAKE_KINDS = {
+    "initial_analysis",
+    "morning_analysis",
+    "work_followup",
+    "daily_report_review",
+    "weekly_summary",
+    "due_task_scan",
+    "workflow_inbox_review",
+    "salesbrain_update_check",
+}
 YEAR_RE = re.compile(r"(?<!\d)(19\d{2}|20\d{2})(?!\d)")
 COMPACT_DATE_RE = re.compile(r"^(19\d{2}|20\d{2})\d{4}(?:\D|$)")
 DATE_LIKE_KEY_PARTS = (
@@ -281,6 +292,10 @@ def normalize_decision(raw: dict[str, Any]) -> dict[str, Any]:
             decision[key] = []
     if "summary" not in decision:
         decision["summary"] = str(raw.get("message") or raw.get("raw_output") or "")
+    if "user_message" not in decision:
+        decision["user_message"] = str(raw.get("mentor_message") or raw.get("message") or "")
+    if "analysis_summary" not in decision:
+        decision["analysis_summary"] = str(raw.get("analysis") or raw.get("reasoning_summary") or "")
     return decision
 
 
@@ -330,6 +345,7 @@ class SalesBrainService:
             latest_sync = _decode_json_columns(latest_sync)
         recent_daily_reports = self._recent_records_by_type("daily_report", daily_report_limit)
         latest_daily_report = recent_daily_reports[0] if recent_daily_reports else None
+        fact_package = build_business_fact_package(self.store, now=now)
         analysis_rules = {
             "follow_up_rules": [
                 "scan the last 20 days of daily reports for explicit next steps",
@@ -358,6 +374,10 @@ class SalesBrainService:
             "now": self.now_iso(now),
             "profile": self.store.get_profile(),
             "latest_sync": latest_sync,
+            "semantic_contract": fact_package["semantic_contract"],
+            "business_facts": fact_package["facts"],
+            "facts_by_ref": fact_package["facts_by_ref"],
+            "work_state": fact_package["work_state"],
             "latest_daily_report": latest_daily_report,
             "recent_daily_reports": recent_daily_reports,
             "recent_projects": self._recent_records_by_type("project", 20),
@@ -1611,9 +1631,13 @@ class SalesBrainService:
         latest_sync = self.store.latest_sync_run()
         if latest_sync:
             latest_sync = _decode_json_columns(latest_sync)
+        fact_package = build_business_fact_package(self.store, now=now_in_zone(self.config.timezone))
         return {
             "profile": self.store.get_profile(),
             "latest_sync": latest_sync,
+            "semantic_contract": fact_package["semantic_contract"],
+            "business_facts": fact_package["facts"][:limit],
+            "work_state": fact_package["work_state"],
             "records": _compact_records(self.store.latest_raw_records(limit), limit),
             "local_tasks": [_decode_json_columns(item) for item in self.store.list_tasks(status="pending", limit=50)],
             "open_review_suggestions": [
@@ -1635,6 +1659,40 @@ class SalesBrainService:
 
     def repair_eboss_object_summaries(self, *, object_type: str | None = None, limit: int | None = None) -> dict[str, Any]:
         return self.store.repair_raw_record_summaries(object_type=object_type, limit=limit)
+
+    def _validate_task_business_fact(self, task: dict[str, Any], source_context: dict[str, Any] | None) -> None:
+        source_type = str(task.get("source_type") or "").strip()
+        source_ref = str(task.get("source_ref") or "").strip()
+        if not source_type and not source_ref:
+            return
+        fact_index = fact_index_from_context(source_context)
+        if source_type in BUSINESS_OBJECT_TYPES:
+            if not source_ref:
+                raise ValueError(f"task.source_ref is required when source_type is {source_type}")
+            fact = fact_index.get(f"{source_type}:{source_ref}")
+            if not fact:
+                raise ValueError(f"task.source_ref not found in business_facts: {source_type}:{source_ref}")
+        else:
+            fact = fact_index.get(f"{source_type}:{source_ref}") if source_ref else None
+        if not fact:
+            return
+        amount_value = task.get("amount_yuan_used")
+        payload_json = task.get("payload_json") if isinstance(task.get("payload_json"), dict) else {}
+        if amount_value in (None, "") and isinstance(payload_json, dict):
+            amount_value = payload_json.get("amount_yuan_used")
+        if amount_value in (None, ""):
+            return
+        expected = fact.get("amount_yuan")
+        expected_amount = parse_amount_yuan(expected)
+        used_amount = parse_amount_yuan(amount_value)
+        if expected_amount is None or used_amount is None:
+            return
+        tolerance = max(1, int(abs(expected_amount) * 0.01))
+        if abs(expected_amount - used_amount) > tolerance:
+            raise ValueError(
+                "task.amount_yuan_used mismatch: "
+                f"{source_type}:{source_ref} expected {expected_amount}, got {used_amount}"
+            )
 
     def _validate_task_payload(self, task: dict[str, Any]) -> None:
         if not str(task.get("title", "")).strip():
@@ -1910,6 +1968,7 @@ class SalesBrainService:
             payload = dict(task)
             payload.setdefault("source_type", source_kind)
             try:
+                self._validate_task_business_fact(payload, source_context)
                 created_tasks.append(self.create_task(payload, now=now))
             except Exception as exc:
                 errors.append({"action": "create_task", "error": str(exc), "payload": json.dumps(payload, ensure_ascii=False)})
@@ -2020,6 +2079,8 @@ class SalesBrainService:
 
         return {
             "summary": normalized.get("summary", ""),
+            "user_message": normalized.get("user_message", ""),
+            "analysis_summary": normalized.get("analysis_summary", ""),
             "created_tasks": created_tasks,
             "updated_tasks": updated_tasks,
             "review_suggestions": review_suggestions,
@@ -2029,6 +2090,47 @@ class SalesBrainService:
             "removed_cron_jobs": removed_cron_jobs,
             "errors": errors,
         }
+
+    def _validate_mentor_delivery(
+        self,
+        *,
+        kind: str,
+        raw: dict[str, Any],
+        applied: dict[str, Any],
+    ) -> list[dict[str, str]]:
+        if kind not in MENTOR_MESSAGE_REQUIRED_WAKE_KINDS:
+            return []
+        normalized = normalize_decision(raw)
+        user_message = str(normalized.get("user_message") or "").strip()
+        message_sent = raw.get("message_sent")
+        if isinstance(message_sent, str):
+            message_sent = message_sent.strip().lower() in {"1", "true", "yes", "sent", "ok"}
+        errors: list[dict[str, str]] = []
+        if not user_message:
+            errors.append(
+                {
+                    "action": "mentor_delivery",
+                    "error": "user_message_required",
+                    "kind": kind,
+                }
+            )
+        if message_sent is not True:
+            errors.append(
+                {
+                    "action": "mentor_delivery",
+                    "error": "message_sent_required",
+                    "kind": kind,
+                }
+            )
+        if kind in {"initial_analysis", "morning_analysis", "work_followup", "daily_report_review"} and not applied.get("scheduled_wakes"):
+            errors.append(
+                {
+                    "action": "mentor_delivery",
+                    "error": "next_wake_plan_required",
+                    "kind": kind,
+                }
+            )
+        return errors
 
     def _wake_openclaw(
         self,
@@ -2064,11 +2166,15 @@ class SalesBrainService:
                 source_run_id=str(wake["id"]),
                 source_context=context,
             )
+            delivery_errors = self._validate_mentor_delivery(kind=kind, raw=result.raw, applied=applied)
+            if delivery_errors:
+                applied["errors"].extend(delivery_errors)
+            overall_ok = bool(result.ok and not applied["errors"])
             finished = self.store.update_wake_run(
                 wake["id"],
                 {
                     "finished_at": self.now_iso(),
-                    "status": "success" if result.ok and not applied["errors"] else "failed",
+                    "status": "success" if overall_ok else "failed",
                     "result_summary": applied.get("summary") or result.summary,
                     "error": json.dumps(applied["errors"], ensure_ascii=False) if applied["errors"] else None,
                     "payload_json": {
@@ -2078,7 +2184,7 @@ class SalesBrainService:
                 },
             )
             return {
-                "ok": result.ok,
+                "ok": overall_ok,
                 "wake_run": _decode_json_columns(finished or wake),
                 "openclaw_result": result.raw,
                 "applied": applied,

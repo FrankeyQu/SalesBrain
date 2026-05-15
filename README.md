@@ -7,9 +7,11 @@ What it does:
 - syncs EBOSS data into SQLite
 - limits EBOSS full sync data to the current calendar year, including first sync and later full syncs
 - backfills the last 30 days of EBOSS daily reports on first successful sync, capped to the current calendar year
+- builds a semantic business fact layer so Openclaw uses standardized IDs, names, amounts, stages, and follow-up dates instead of guessing from raw EBOSS JSON
 - runs a first-use EBOSS sync and full Openclaw analysis during `salesbrain init`
 - tracks follow-up tasks, review suggestions, and workflow patterns
 - wakes Openclaw on deterministic schedules and lets each analysis return adaptive `next_wake_plans` for the next sales follow-up
+- requires user-facing wakes to include a mentor-style `user_message` and `message_sent=true`; otherwise the wake is recorded as failed
 - can run a one-shot health monitor that repairs due jobs and records scheduler health
 - can install a Linux cron watchdog that keeps the SalesBrain daemon running in Openclaw Docker containers
 - applies Openclaw's structured decisions
@@ -46,6 +48,20 @@ For a visible first setup, Openclaw should use `python3 -m salesbrain init --no-
 SalesBrain no longer depends on only the three fixed follow-up slots. After each useful wake, Openclaw can return `next_wake_plans` with a concrete `due_at`, and SalesBrain stores that as a one-shot `planned_wake` scheduler job. When it fires, SalesBrain wakes Openclaw again and the new analysis can schedule the next one.
 
 The 08:30, 13:30, and 19:30 jobs remain fallback anchors. The primary follow-up rhythm is the adaptive chain created from the latest EBOSS state, daily reports, pending tasks, and Openclaw's own analysis.
+
+Every user-facing wake is a mentor review, not a plain task push. Openclaw should send `user_message` in a mentor-assistant tone: current-state analysis, what to do now, why it matters, and when SalesBrain will check again. SalesBrain treats missing `user_message` or missing `message_sent=true` as a failed wake.
+
+## Business facts
+
+SalesBrain derives `business_facts` from EBOSS raw records before waking Openclaw. These facts standardize:
+
+- object identity: `object_type` + `object_id`
+- object name
+- amount: `amount_yuan`, `amount_display`, `amount_source`, `amount_confidence`
+- stage and stage source
+- last follow-up time and source
+
+Openclaw should use `business_facts` and `work_state` as the source of truth. Raw EBOSS payloads remain available as fallback context only. If Openclaw creates a task tied to an EBOSS object, SalesBrain validates `source_type`, `source_ref`, and `amount_yuan_used` against the fact layer before saving it.
 
 Or create a local config from the included template:
 

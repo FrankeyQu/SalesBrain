@@ -7,6 +7,9 @@ from typing import Any
 RESPONSE_SCHEMA = {
     "ok": True,
     "summary": "short human-readable summary",
+    "user_message": "导师助理要发给销售的完整消息，必须是可直接发送给用户的口吻",
+    "analysis_summary": "本次判断依据，说明你为什么这样提醒和安排",
+    "message_sent": True,
     "tasks_to_create": [
         {
             "title": "string",
@@ -16,6 +19,7 @@ RESPONSE_SCHEMA = {
             "priority": "normal",
             "source_type": "morning_analysis",
             "source_ref": "optional",
+            "amount_yuan_used": "optional integer; required when the task mentions an EBOSS object amount",
             "payload_json": {},
         }
     ],
@@ -108,6 +112,13 @@ Context:
 {_json_block(context)}
 
 Rules:
+- Use semantic_contract, business_facts, and work_state as the source of truth for EBOSS object IDs, names, stages, amounts, and follow-up dates.
+- Do not infer opportunity or project amounts from raw EBOSS payloads. Use business_facts.amount_yuan and business_facts.amount_display only.
+- If amount_confidence is conflict or missing, say that the amount口径 is uncertain instead of presenting it as definite.
+- When a task refers to an EBOSS opportunity, project, customer, lead, or EBOSS task, set source_type to that object type and source_ref to the exact object_id.
+- When you mention an EBOSS amount in a task, include amount_yuan_used with the exact business_facts.amount_yuan.
+- For user-facing wakes, write user_message in a mentor-assistant tone, send it to the user, and return message_sent=true only after it is actually sent.
+- The user_message must analyze the current work state and tell the sales person what to do now, why it matters, and when you will check again.
 - All tasks you create must be concrete, actionable, and date-specific.
 - Do not invent EBOSS facts not present in the context.
 - Do not directly write EBOSS. SalesBrain handles storage and execution.
@@ -170,10 +181,11 @@ def build_work_followup_prompt(context: dict[str, Any]) -> str:
         prompt
         + "\n\nFocus:\n"
         + "- this is an adaptive sales follow-up wake, not a fixed clock-driven reminder\n"
-        + "- remind the sales person about concrete next actions that should be pushed now\n"
+        + "- do not only list pending tasks; first analyze the current work state like a mentor, then tell the sales person what to do now\n"
+        + "- remind the sales person about concrete next actions that should be pushed now, with the reason and expected outcome\n"
         + "- create or update tasks directly when a follow-up is needed\n"
         + "- prefer short, specific, execution-ready task titles\n"
-        + "- if the account still needs another touch, return a next_wake_plans item with a concrete future due_at\n"
+        + "- if the account still needs another touch, return a next_wake_plans item with a concrete future due_at and expected outcome in payload_json\n"
         + "- use the fixed daily anchor times only as fallback context, not as the primary schedule choice\n"
     )
 

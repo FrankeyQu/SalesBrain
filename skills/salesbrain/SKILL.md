@@ -42,8 +42,10 @@ Openclaw 负责分析和判断，SalesBrain 负责调度、落库、同步、提
 
 你需要做的事情通常是：
 
-- 读 EBOSS 上下文
+- 优先读取 `semantic_contract`、`business_facts` 和 `work_state`
+- 只把 EBOSS raw records 当成补充上下文，不要从 raw JSON 里猜金额
 - 生成或更新任务
+- 用导师助理口吻发送 `user_message`
 - 产出 review suggestion
 - 沉淀 workflow items
 - 决定哪些 Openclaw 业务 cron 应迁移到 SalesBrain
@@ -261,6 +263,9 @@ http://10.50.3.37:37611
 {
   "ok": true,
   "summary": "short result",
+  "user_message": "导师助理发给销售的完整消息",
+  "analysis_summary": "本次判断依据",
+  "message_sent": true,
   "tasks_to_create": [],
   "tasks_to_update": [],
   "review_suggestions": [],
@@ -272,6 +277,30 @@ http://10.50.3.37:37611
   "notes": ""
 }
 ```
+
+所有面向用户的 wake 都必须返回 `user_message` 和 `message_sent: true`。`user_message` 不是待办列表，而是导师助理口吻：先分析当前工作状态，再告诉销售现在该做什么、为什么、预期结果是什么、下一次什么时候检查。SalesBrain 如果没有看到 `message_sent: true`，会把本次 wake 记录为失败。
+
+### 数据口径
+
+上下文里会有三组标准数据：
+
+- `semantic_contract`：数据使用规则
+- `business_facts`：标准化后的 EBOSS 业务事实
+- `work_state`：当前工作状态包
+
+`business_facts` 是金额、阶段、跟进时间、对象 ID 的主来源。不要自己从 EBOSS raw payload 里推断商机金额或项目金额。
+
+如果任务绑定 EBOSS 对象，必须写：
+
+```json
+{
+  "source_type": "opportunity",
+  "source_ref": "4914",
+  "amount_yuan_used": 129585
+}
+```
+
+SalesBrain 会校验 `source_type + source_ref` 是否存在，且 `amount_yuan_used` 是否等于 `business_facts.amount_yuan`。不一致时任务不会入库。
 
 ### `workflow_items`
 

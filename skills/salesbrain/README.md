@@ -8,6 +8,7 @@ SalesBrain 是给 Openclaw 用的销售陪跑系统。它不是 AI 模型，而�
 - 读取 EBOSS API Key
 - 验证 Openclaw 唤醒桥接，并发送一条可见测试消息
 - 首次全量同步 EBOSS 本年度项目、商机、日报和相关明细
+- 从 EBOSS 原始数据生成标准业务事实，统一金额、对象 ID、阶段和跟进时间口径
 - 在首次整体分析前，先迁移 Openclaw 里的业务 cron
 - 之后每天按固定时间唤醒 Openclaw 做分析、跟进、日报审阅、周总结和方法沉淀
 - 发现 GitHub 或公司 SkillHub 有新版本时，提醒你选择更新
@@ -116,6 +117,20 @@ Openclaw 的原生 cron 可能受进程重启、运行环境或执行丢失影�
 在 Openclaw 托管 Docker 容器里，SalesBrain 使用 Linux 系统 cron 安装 watchdog：每分钟运行一次 `python3 -m salesbrain service ensure-running`，检查 daemon 进程、心跳和逾期任务；daemon 停止时自动拉起，并先补跑到期任务。这个 cron 是容器里的系统 cron，不是 Openclaw 业务 cron。
 
 销售跟进的主节奏不是固定三次。Openclaw 每次分析后可以返回 `next_wake_plans`，SalesBrain 会把它保存成一次性 `planned_wake`，到点后再次唤醒 Openclaw。固定三次只是在没有明确动态计划时的兜底。
+
+每次面向销售的唤醒都必须是导师分析，不是单纯待办推送。Openclaw 需要发送 `user_message`，内容要包括：当前工作状态判断、现在该做什么、为什么优先做、预期结果、下一次检查时间。SalesBrain 只有在收到 `message_sent: true` 后才认为本次唤醒成功。
+
+## 数据口径和金额正确性
+
+SalesBrain 会先把 EBOSS raw records 转成 `business_facts`：
+
+- `object_type` / `object_id`：对象身份，避免靠名称匹配
+- `amount_yuan` / `amount_display`：标准金额
+- `amount_source`：金额来自哪个 EBOSS API 和字段
+- `amount_confidence`：`high`、`medium`、`low`、`conflict`、`missing`
+- `stage` / `last_follow_at`：阶段和最近跟进时间
+
+Openclaw 分析时必须优先使用 `business_facts` 和 `work_state`。如果创建任务时引用了商机或项目金额，需要返回 `amount_yuan_used`。SalesBrain 会校验金额和对象 ID；金额不一致时，任务不会入库，并会在 wake run 里记录错误。
 
 ## 团队同步规则
 

@@ -20,6 +20,9 @@ class DummyOpenClaw:
         raw = {
             "ok": True,
             "summary": f"{kind} summary",
+            "user_message": f"{kind} mentor message",
+            "analysis_summary": f"{kind} analysis",
+            "message_sent": True,
             "tasks_to_create": [
                 {
                     "title": "Follow up with customer",
@@ -170,6 +173,9 @@ class InboxReviewOpenClaw:
             raw={
                 "ok": True,
                 "summary": "发现团队同步来的新方法，需要销售确认是否采纳。",
+                "user_message": "我发现团队同步来一个新方法，需要你确认是否采纳。",
+                "analysis_summary": "团队方法进入 inbox，需要用户确认。",
+                "message_sent": True,
                 "workflow_inbox_decisions": [],
             },
         )
@@ -185,6 +191,9 @@ class AdaptiveOpenClaw:
             raw = {
                 "ok": True,
                 "summary": "morning summary",
+                "user_message": "上午先处理最高优先级事项，我会稍后再检查推进结果。",
+                "analysis_summary": "晨间分析后需要继续跟进。",
+                "message_sent": True,
                 "next_wake_plans": [
                     {
                         "kind": "work_followup",
@@ -197,6 +206,9 @@ class AdaptiveOpenClaw:
             raw = {
                 "ok": True,
                 "summary": "followup summary",
+                "user_message": "现在检查上午安排的跟进动作，并继续推进下一步。",
+                "analysis_summary": "跟进链路仍然活跃。",
+                "message_sent": True,
                 "next_wake_plans": [
                     {
                         "kind": "work_followup",
@@ -206,8 +218,19 @@ class AdaptiveOpenClaw:
                 ],
             }
         else:
-            raw = {"ok": True, "summary": f"{kind} summary"}
+            raw = {
+                "ok": True,
+                "summary": f"{kind} summary",
+                "user_message": f"{kind} mentor message",
+                "analysis_summary": f"{kind} analysis",
+                "message_sent": True,
+            }
         return OpenClawWakeResult(ok=True, raw=raw)
+
+
+class SilentOpenClaw:
+    def wake(self, kind: str, payload: dict[str, object]) -> OpenClawWakeResult:
+        return OpenClawWakeResult(ok=True, raw={"ok": True, "summary": "only summary"})
 
 
 def _fake_commit(sha: str = "abc123") -> GitHubCommitInfo:
@@ -277,6 +300,23 @@ def test_missing_openclaw_bridge_fails_wake_run_instead_of_file_fallback(tmp_pat
     service.close()
 
 
+def test_visible_wake_requires_mentor_message_and_delivery_confirmation(tmp_path, monkeypatch):
+    monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
+    config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")
+    cfg = load_config(config_path)
+    service = SalesBrainService(cfg, openclaw_adapter=SilentOpenClaw())
+    service.bootstrap()
+
+    result = service.work_followup(now=datetime(2026, 5, 11, 13, 30, tzinfo=ZoneInfo("Asia/Shanghai")))
+
+    assert result["ok"] is False
+    assert result["wake_run"]["status"] == "failed"
+    errors = result["applied"]["errors"]
+    assert any(error["error"] == "user_message_required" for error in errors)
+    assert any(error["error"] == "message_sent_required" for error in errors)
+    service.close()
+
+
 def test_next_wake_plan_schedules_adaptive_planned_wake(tmp_path, monkeypatch):
     monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
     config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")
@@ -333,6 +373,89 @@ def test_work_followup_without_explicit_plan_uses_adaptive_fallback(tmp_path, mo
     assert scheduled["next_run_at"] == "2026-05-11T15:30:00+08:00"
     assert scheduled["payload_json"]["wake_kind"] == "work_followup"
     assert scheduled["payload_json"]["payload_json"]["fallback"] is True
+    service.close()
+
+
+def test_business_facts_use_standard_amount_source_and_validate_task_amounts(tmp_path, monkeypatch):
+    monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
+    config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")
+    cfg = load_config(config_path)
+    service = SalesBrainService(cfg, openclaw_adapter=DummyOpenClaw())
+    service.bootstrap()
+    run_id = service.store.insert_sync_run(run_type="eboss_sync", started_at="2026-05-11T02:00:00+08:00")
+    service.store.insert_raw_records(
+        sync_run_id=run_id,
+        api_id="get-opportunity-list",
+        object_type="opportunity",
+        records=[
+            {
+                "id": "4914",
+                "optName": "宁夏联通全平台管控感知平台",
+                "optAmount": "144486",
+                "createTime": "2026-05-01 09:00:00",
+            }
+        ],
+        fetched_at="2026-05-11T02:00:00+08:00",
+    )
+    service.store.insert_raw_records(
+        sync_run_id=run_id,
+        api_id="get-opportunity-detail",
+        object_type="opportunity_detail",
+        records=[
+            {
+                "id": "4914",
+                "optName": "宁夏联通全平台管控感知平台",
+                "expectedAmount": "129585",
+                "stageName": "需求沟通",
+            }
+        ],
+        fetched_at="2026-05-11T02:00:00+08:00",
+    )
+
+    context = service._analysis_context(now=datetime(2026, 5, 11, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")))
+    fact = context["facts_by_ref"]["opportunity:4914"]
+    assert fact["amount_yuan"] == 129585
+    assert fact["amount_display"] == "12.96万"
+    assert fact["amount_source"].startswith("opportunity_detail.")
+    assert fact["stage"] == "需求沟通"
+
+    mismatch = service.apply_openclaw_decision(
+        {
+            "tasks_to_create": [
+                {
+                    "title": "跟进宁夏联通商机",
+                    "due_at": "2026-05-11T18:00:00+08:00",
+                    "source_type": "opportunity",
+                    "source_ref": "4914",
+                    "amount_yuan_used": 144486,
+                }
+            ]
+        },
+        source_kind="work_followup",
+        now=datetime(2026, 5, 11, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+        source_context=context,
+    )
+    assert mismatch["created_tasks"] == []
+    assert "amount_yuan_used mismatch" in mismatch["errors"][0]["error"]
+
+    applied = service.apply_openclaw_decision(
+        {
+            "tasks_to_create": [
+                {
+                    "title": "跟进宁夏联通商机",
+                    "due_at": "2026-05-11T18:00:00+08:00",
+                    "source_type": "opportunity",
+                    "source_ref": "4914",
+                    "amount_yuan_used": 129585,
+                }
+            ]
+        },
+        source_kind="work_followup",
+        now=datetime(2026, 5, 11, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+        source_context=context,
+    )
+    assert applied["errors"] == []
+    assert applied["created_tasks"][0]["source_ref"] == "4914"
     service.close()
 
 
