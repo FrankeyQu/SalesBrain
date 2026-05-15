@@ -101,9 +101,10 @@ SalesBrain now sends a semantic data layer in the context:
 
 - `semantic_contract`: rules for using IDs, amounts, and confidence
 - `business_facts`: standardized EBOSS objects with `object_type`, `object_id`, `name`, `amount_yuan`, `amount_display`, `amount_source`, `amount_confidence`, `stage`, and `last_follow_at`
-- `work_state`: curated current-state lists such as high-value opportunities, stale objects, and amount conflicts
+- `work_state`: curated current-state lists such as high-value opportunities, high-value stale opportunities, stale objects, and amount conflicts
 
 Use `business_facts` as the source of truth. Do not infer opportunity or project amounts from raw EBOSS payloads. If a task refers to an EBOSS object, return the exact `source_type` and `source_ref`; when a task mentions an amount, include `amount_yuan_used`.
+For EBOSS opportunities, SalesBrain treats `currencyMoney` as a preferred amount source and `followTime` as a follow-up time source. Use `work_state.high_value_stale_opportunities` for opportunities whose amount is at least 100,000 yuan and whose latest known follow-up is at least 7 days old.
 
 For `salesbrain_update_check`, the `summary` should be a direct question asking the user whether to update SalesBrain. The bridge must not update code without user confirmation.
 For normal sales analysis wakes, Openclaw should create or update tasks directly in JSON and should not ask the sales person for confirmation first.

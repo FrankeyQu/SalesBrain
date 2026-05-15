@@ -459,6 +459,59 @@ def test_business_facts_use_standard_amount_source_and_validate_task_amounts(tmp
     service.close()
 
 
+def test_business_facts_prefer_currency_money_and_expose_high_value_stale_opportunities(tmp_path, monkeypatch):
+    monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
+    config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")
+    cfg = load_config(config_path)
+    service = SalesBrainService(cfg, openclaw_adapter=DummyOpenClaw())
+    service.bootstrap()
+    run_id = service.store.insert_sync_run(run_type="eboss_sync", started_at="2026-05-11T02:00:00+08:00")
+    service.store.insert_raw_records(
+        sync_run_id=run_id,
+        api_id="get-opportunity-list",
+        object_type="opportunity",
+        records=[
+            {
+                "id": "opp-1",
+                "optName": "陕西移动 IPOSS 扩容",
+                "projectEffAmount": "144486",
+                "currencyMoney": "1000000",
+                "followTime": "2026-04-20 10:00:00",
+                "createTime": "2026-01-20 10:00:00",
+            },
+            {
+                "id": "opp-2",
+                "optName": "低金额商机",
+                "currencyMoney": "90000",
+                "followTime": "2026-04-01 10:00:00",
+                "createTime": "2026-01-20 10:00:00",
+            },
+            {
+                "id": "opp-3",
+                "optName": "刚跟进高金额商机",
+                "currencyMoney": "300000",
+                "followTime": "2026-05-10 10:00:00",
+                "createTime": "2026-01-20 10:00:00",
+            },
+        ],
+        fetched_at="2026-05-11T02:00:00+08:00",
+    )
+
+    context = service._analysis_context(now=datetime(2026, 5, 11, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")))
+    fact = context["facts_by_ref"]["opportunity:opp-1"]
+    assert fact["amount_yuan"] == 1_000_000
+    assert fact["amount_display"] == "100万"
+    assert fact["amount_source"] == "opportunity.currencyMoney"
+    assert fact["last_follow_at"] == "2026-04-20T10:00:00"
+    assert fact["days_since_last_follow"] == 20
+    stale = context["work_state"]["high_value_stale_opportunities"]
+    assert [item["object_id"] for item in stale] == ["opp-1"]
+
+    report = service.build_initial_analysis_report()
+    assert report["opportunities"]["amount_total"] == 1_390_000
+    service.close()
+
+
 def test_first_eboss_sync_backfills_30_daily_reports(tmp_path, monkeypatch):
     monkeypatch.setattr("salesbrain.service.fetch_remote_commit", lambda repo, branch, timeout=30: _fake_commit())
     config_path = write_default_config(tmp_path / "config.toml", sales_name="Alice")

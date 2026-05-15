@@ -62,6 +62,7 @@ SalesBrain derives `business_facts` from EBOSS raw records before waking Opencla
 - last follow-up time and source
 
 Openclaw should use `business_facts` and `work_state` as the source of truth. Raw EBOSS payloads remain available as fallback context only. If Openclaw creates a task tied to an EBOSS object, SalesBrain validates `source_type`, `source_ref`, and `amount_yuan_used` against the fact layer before saving it.
+For EBOSS opportunities, `currencyMoney` is treated as a preferred business amount field. `followTime` is used as a follow-up time source, and `work_state.high_value_stale_opportunities` highlights opportunities with amount >= 100,000 yuan and last follow-up at least 7 days ago.
 
 Or create a local config from the included template:
 

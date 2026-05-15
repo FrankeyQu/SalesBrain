@@ -114,6 +114,7 @@ Context:
 Rules:
 - Use semantic_contract, business_facts, and work_state as the source of truth for EBOSS object IDs, names, stages, amounts, and follow-up dates.
 - Do not infer opportunity or project amounts from raw EBOSS payloads. Use business_facts.amount_yuan and business_facts.amount_display only.
+- Use work_state.high_value_stale_opportunities as the first candidate list for high-value overdue opportunity follow-up.
 - If amount_confidence is conflict or missing, say that the amount口径 is uncertain instead of presenting it as definite.
 - When a task refers to an EBOSS opportunity, project, customer, lead, or EBOSS task, set source_type to that object type and source_ref to the exact object_id.
 - When you mention an EBOSS amount in a task, include amount_yuan_used with the exact business_facts.amount_yuan.

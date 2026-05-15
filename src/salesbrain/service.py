@@ -750,6 +750,11 @@ class SalesBrainService:
             + self._recent_records_by_type("opportunity_follow_record", 1000)
             + self._recent_records_by_type("follow_record", 1000)
         )
+        fact_package = build_business_fact_package(self.store, now=now_in_zone(self.config.timezone))
+        opportunity_facts = [
+            fact for fact in fact_package["facts"]
+            if fact.get("object_type") == "opportunity"
+        ]
 
         def payloads(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             values: list[dict[str, Any]] = []
@@ -765,27 +770,23 @@ class SalesBrainService:
         follow_payloads = payloads(recent_follow_records)
 
         status_distribution: dict[str, int] = {}
-        amount_total = 0.0
-        amount_seen = False
-        key_opportunities: list[str] = []
+        amount_values = [
+            int(fact["amount_yuan"])
+            for fact in opportunity_facts
+            if fact.get("amount_yuan") is not None
+        ]
+        amount_total = sum(amount_values)
+        amount_seen = bool(amount_values)
+        key_opportunities = [
+            str(fact.get("name") or fact.get("object_id"))
+            for fact in opportunity_facts[:5]
+            if fact.get("name") or fact.get("object_id")
+        ]
         for payload in opportunity_payloads:
             status = _first_payload_value(payload, ["optState", "optStateName", "status", "statusName", "stageName"])
             if status is not None:
                 status_text = str(status)
                 status_distribution[status_text] = status_distribution.get(status_text, 0) + 1
-            amount = _first_payload_value(
-                payload,
-                ["amount", "optAmount", "estimatedAmount", "forecastAmount", "budgetAmount", "salesAmount"],
-            )
-            if amount not in (None, ""):
-                try:
-                    amount_total += float(str(amount).replace(",", ""))
-                    amount_seen = True
-                except ValueError:
-                    pass
-            name = _first_payload_value(payload, ["optName", "opportunityName", "name", "title"])
-            if name and len(key_opportunities) < 5:
-                key_opportunities.append(str(name))
 
         overdue_customers: list[dict[str, Any]] = []
         for payload in customer_payloads:

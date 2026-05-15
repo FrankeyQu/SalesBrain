@@ -290,6 +290,8 @@ http://10.50.3.37:37611
 
 `business_facts` 是金额、阶段、跟进时间、对象 ID 的主来源。不要自己从 EBOSS raw payload 里推断商机金额或项目金额。
 
+商机金额优先使用 SalesBrain 标准化后的 `amount_yuan`。EBOSS 原始字段里，`currencyMoney` 已作为商机金额优先来源之一，`followTime` 已作为最近跟进时间来源之一。`work_state.high_value_stale_opportunities` 表示金额不少于 10 万元且最近跟进已超过 7 天的高价值超期商机。
+
 如果任务绑定 EBOSS 对象，必须写：
 
 ```json

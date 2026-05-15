@@ -132,6 +132,8 @@ SalesBrain 会先把 EBOSS raw records 转成 `business_facts`：
 
 Openclaw 分析时必须优先使用 `business_facts` 和 `work_state`。如果创建任务时引用了商机或项目金额，需要返回 `amount_yuan_used`。SalesBrain 会校验金额和对象 ID；金额不一致时，任务不会入库，并会在 wake run 里记录错误。
 
+商机金额字段里，SalesBrain 会优先识别 `currencyMoney`；最近跟进时间会识别 `followTime`。`work_state.high_value_stale_opportunities` 会单独列出金额不少于 10 万元且最近跟进超过 7 天的商机，供 Openclaw 做导师式跟进分析。
+
 ## 团队同步规则
 
 团队只同步两类内容：

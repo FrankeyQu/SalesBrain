@@ -48,11 +48,19 @@ FOLLOW_TIME_KEYS = (
 
 AMOUNT_RULES: dict[str, list[tuple[str, tuple[str, ...], str]]] = {
     "opportunity": [
-        ("opportunity_detail", ("expectedAmount", "expectedAmt", "optAmount", "amount", "estimatedAmount", "salesAmount"), "high"),
+        (
+            "opportunity_detail",
+            ("currencyMoney", "expectedAmount", "expectedAmt", "optAmount", "amount", "estimatedAmount", "salesAmount"),
+            "high",
+        ),
         ("opportunity_forecast", ("forecastAmount", "forecastAmt", "amount", "totalAmount"), "medium"),
         ("opportunity_budget", ("budgetAmount", "budgetAmt", "amount", "totalAmount"), "medium"),
         ("opportunity_actual", ("actualAmount", "contractAmount", "amount", "totalAmount"), "low"),
-        ("opportunity", ("expectedAmount", "expectedAmt", "optAmount", "amount", "estimatedAmount", "salesAmount"), "medium"),
+        (
+            "opportunity",
+            ("currencyMoney", "expectedAmount", "expectedAmt", "optAmount", "amount", "estimatedAmount", "salesAmount"),
+            "medium",
+        ),
     ],
     "project": [
         ("project_budget", ("budgetAmount", "budgetAmt", "totalAmount", "amount", "projectAmount"), "high"),
@@ -406,6 +414,21 @@ def build_business_fact_package(store: Any, *, now: datetime, limit_per_type: in
         fact for fact in fact_list
         if fact["object_type"] == "opportunity" and (fact.get("amount_yuan") or 0) >= 100_000
     ][:10]
+    high_value_stale_opportunities = [
+        fact for fact in fact_list
+        if fact["object_type"] == "opportunity"
+        and (fact.get("amount_yuan") or 0) >= 100_000
+        and fact.get("days_since_last_follow") is not None
+        and int(fact.get("days_since_last_follow") or 0) >= 7
+    ]
+    high_value_stale_opportunities.sort(
+        key=lambda item: (
+            -(item.get("amount_yuan") or 0),
+            -int(item.get("days_since_last_follow") or 0),
+            item.get("name") or "",
+        )
+    )
+    high_value_stale_opportunities = high_value_stale_opportunities[:10]
     stale_objects = [
         fact for fact in fact_list
         if fact["object_type"] in {"opportunity", "project", "customer"}
@@ -428,6 +451,7 @@ def build_business_fact_package(store: Any, *, now: datetime, limit_per_type: in
         "facts_by_ref": {fact["object_ref"]: fact for fact in fact_list[:200]},
         "work_state": {
             "high_value_opportunities": high_value_opportunities,
+            "high_value_stale_opportunities": high_value_stale_opportunities,
             "stale_objects": stale_objects,
             "amount_conflicts": amount_conflicts,
             "counts": {
